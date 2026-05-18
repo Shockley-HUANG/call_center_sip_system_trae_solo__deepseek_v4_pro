@@ -1,0 +1,76 @@
+# ============================================================
+#  .gitignore — 呼叫中心 SIP 系统 (C + Lua)
+# ============================================================
+
+# --- 编译产物 ---
+build/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.la
+*.lo
+*.exe
+*.out
+sip_server
+*.luac
+
+# --- 日志文件 ---
+log/
+*.log
+
+# --- 临时文件 ---
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+*.temp
+*.pid
+
+# --- 系统垃圾文件 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- IDE 配置文件 ---
+.vs/
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# --- Core dump ---
+*.core
+core
+nohup.out
+
+# --- 依赖 / 打包 ---
+deps/
+*.tar.gz
+*.tar.bz2
+*.zip
+*.7z
+*.rar
+
+# --- 媒体 / 录音 ---
+recordings/
+media/
+*.wav
+*.mp3
+
+# --- 密钥 / 环境 ---
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# --- 其他 ---
+.DS_Store
