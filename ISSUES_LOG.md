@@ -99,6 +99,87 @@ git push origin main                               # 推送
 
 ---
 
+## 问题 #2 — GitHub 页面中文乱码（UTF-8 BOM 缺失）
+
+**日期**：2026-05-18
+
+**严重程度**：高
+
+**状态**：已解决 ✅
+
+### 问题描述
+
+README.md 文件在本地 IDE（Trae Solo）和 raw.githubusercontent.com 中中文显示正常，但在 GitHub 仓库主页渲染时全部显示为乱码。问题页面：https://github.com/Shockley-HUANG/call_center_sip_system_trae_solo__deepseek_v4_pro
+
+### 根因分析
+
+| 编码格式 | GitHub 主页 | raw 文件 | 本地 IDE |
+|----------|:-----------:|:--------:|:--------:|
+| UTF-8 with BOM | ✅ 正常 | ✅ 正常 | ✅ 正常 |
+| UTF-8 without BOM | ❌ 乱码 | ✅ 正常 | ✅ 正常 |
+
+核心原因：**GitHub 主页的 Markdown 渲染引擎依赖 BOM（Byte Order Mark，文件头 `EF BB BF` 三字节）来自动检测文件编码**。如果文件缺少 BOM 前缀，GitHub 在无法确认编码的情况下会使用错误编码（如 latin-1 或 Windows-1252）解析中文字符，导致乱码。
+
+`Write` 工具默认写入的是 UTF-8 without BOM，这是导致该问题的直接原因。
+
+本地 IDE 和 raw.githubusercontent.com 之所以不受影响，是因为它们的编码检测算法更智能，可以在无 BOM 情况下通过内容分析自动判定 UTF-8。
+
+### 尝试过的无效操作
+
+| 操作 | 结果 |
+|------|------|
+| 多次 `Write` 重写 README.md | GitHub 主页依然乱码 |
+| 多次 commit + push | GitHub CDN 缓存导致旧版本持续显示 |
+| 等待 CDN 自动刷新 | GitHub 主页始终显示乱码（根本是编码问题） |
+| 修改文件 mtime 强制刷新 | 无效 |
+| `git update-index --really-refresh` + 重推 | 无效（因为文件编码本身没有 BOM） |
+
+### 最终解决方案
+
+**步骤 1**：删除旧的 README.md，用 `Write` 工具完整重写文件内容。
+
+**步骤 2**：用 PowerShell 命令**强制补写 UTF-8 BOM**：
+
+```powershell
+$content = Get-Content README.md -Raw -Encoding UTF8
+[System.IO.File]::WriteAllText("$PWD\README.md", $content, [System.Text.UTF8Encoding]::new($true))
+```
+
+关键点：`[System.Text.UTF8Encoding]::new($true)` 中的 `$true` 参数表示在文件头部写入 BOM（`EF BB BF`）。
+
+**步骤 3**：验证 BOM 是否成功写入：
+
+```powershell
+$bytes = [System.IO.File]::ReadAllBytes("$PWD\README.md")
+# 期望输出：239 187 191
+Write-Output "BOM: $($bytes[0]) $($bytes[1]) $($bytes[2])"
+```
+
+**步骤 4**：强制刷新 Git 索引并提交推送：
+
+```powershell
+git update-index --really-refresh README.md
+git add README.md
+git commit -m "fix: README.md 添加UTF-8 BOM修复GitHub中文乱码"
+git push origin main
+```
+
+最终 commit：`e596361`。通过 raw.githubusercontent.com 按 commit hash 验证（`/e596361/README.md`），中文已全部正常显示。
+
+### 经验教训
+
+1. **所有含中文内容的项目文件（README.md、ISSUES_LOG.md、docs/*.md 等），必须在写入后补写 UTF-8 BOM**。
+2. `Write` 工具默认输出 UTF-8 without BOM，不能假设文件已包含 BOM。
+3. 文件写入后必须验证 BOM 字节（`EF BB BF`）是否存在。
+4. 不能用本地 IDE 或 raw.githubusercontent.com 的正常显示来判断 GitHub 主页是否正常 — 它们的编码检测机制不同。
+5. GitHub 主页 CDN 缓存可能延长问题排查时间，验证时用 raw URL 按 commit hash 访问（如 `/e596361/README.md`）可绕过 CDN 缓存。
+
+### 已落地规则
+
+见 [.trae/rules/project_rules.md](./.trae/rules/project_rules.md) — 「文件编码规范」章节。
+
+---
+
 ## 问题记录模板
 
 > 后续新问题按以下格式追加：
