@@ -17,6 +17,7 @@
 - 实际上磁盘文件内容已更新
 
 **适用场景**：
+
 | 场景 | 推荐方式 |
 |------|----------|
 | 修改文件中 **≥ 3 处** 不同位置 | `Write` 一次性完整重写整个文件 |
@@ -28,6 +29,30 @@
 2. 在内存中完成所有修改
 3. 用 `Write` 一次性写入完整文件
 4. 立即执行 `git add <file>` + `git diff --cached` 验证暂存区
+
+### 终极方案：Git 无法检测文件变更时
+
+如果 `Write` 完整重写后 Git 仍无法检测到变更（`git status` 显示 clean）：
+
+```powershell
+# 对比工作区和 HEAD 的哈希，确认文件确实被修改
+git hash-object <file>           # 工作区哈希
+git ls-tree HEAD <file>          # HEAD 哈希
+
+# 强制 Git 跳过 stat 缓存，重新扫描文件内容
+git update-index --really-refresh <file>
+
+# 此后 git status 应能检测到变更
+git status
+git add <file>
+git commit -m "..."
+git push origin main
+```
+
+**关键区别**：
+- `git update-index --refresh`：仅刷新 stat 信息，如果 mtime 不变则跳过
+- `git update-index --really-refresh`：**强制重新读取文件内容并计算哈希**，无视 stat 缓存
+- `--really-refresh` 比修改文件 mtime（`LastWriteTime`）、`git add -f` 等方案都更可靠
 
 ## 构建与运行
 

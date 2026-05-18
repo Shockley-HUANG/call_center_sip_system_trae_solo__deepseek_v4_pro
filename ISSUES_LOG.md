@@ -32,6 +32,8 @@
 | Git stat 缓存 | ❌ 未刷新 | Git 基于 mtime/size 缓存，未感知到文件变更 |
 | Git index | ❌ 未更新 | `git diff` 使用缓存的 stat 信息，认为文件未变 |
 
+通过 `git hash-object` 对比验证，确认工作区文件哈希 (`7614ec`) ≠ 索引/HEAD 哈希 (`ac2d15`)，文件确实已修改但 Git 未追踪。
+
 Windows 文件系统 API 与 Git 的 stat 缓存机制在特定条件下存在竞态，导致增量修改被 Git 忽略。
 
 ### 尝试过的无效操作
@@ -42,27 +44,54 @@ Windows 文件系统 API 与 Git 的 stat 缓存机制在特定条件下存在�
 | `git update-index --refresh README.md` | 无效 |
 | `git checkout HEAD -- README.md` | 文件未被恢复到旧版本 |
 | `git reset HEAD README.md` | 无效 |
+| `git add -f README.md` | 无效 |
 | 多次 `git commit` 尝试 | "nothing to commit" |
+| 修改文件 mtime (`LastWriteTime = Get-Date`) | 无效 |
+| 用 `Write` 工具完整重写文件 | 无效（后续测试中发现） |
 
 ### 最终解决方案
 
-使用 `Write` 工具**一次性完整重写整个 README.md 文件**（260 行），替代 7 次 `SearchReplace` 增量修改：
+**方法一（第一轮）**：使用 `Write` 工具一次性完整重写整个 README.md 文件（260 行），替代 7 次 `SearchReplace` 增量修改：
 
 ```powershell
 Write README.md  # 一次性写入全部内容
 git add README.md  # → 检测到 modified ✅
 git commit -m "docs: README格式规范化，补充开发工具信息（Trae Solo + DeepSeek V4 PRO）"
-git branch --unset-upstream  # 修复 upstream 丢失
 git push -u origin main  # → 远程同步成功 ✅
 ```
 
-最终 commit：`55809e1`，SHA 与远程一致，GitHub 页面确认内容已同步。
+最终 commit：`55809e1`。
+
+---
+
+**方法二（第二轮，更可靠）**：当 `Write` 工具也无法触发 Git 检测时（在后续修改中再次出现），使用以下命令**强制刷新 Git 索引**：
+
+```powershell
+git update-index --really-refresh <file>
+```
+
+关键区别：
+- `git update-index --refresh`：仅刷新 stat 信息，如果 mtime 不变则跳过
+- `git update-index --really-refresh`：**强制重新读取文件内容**，无视 stat 缓存
+
+完整流程：
+```powershell
+Write README.md                                   # 写入文件
+git update-index --really-refresh README.md       # 强制 Git 重新扫描文件
+git status                                         # → 确认检测到 modified ✅
+git add README.md                                  # 暂存
+git commit -m "..."                                # 提交
+git push origin main                               # 推送
+```
+
+最终 commit：`f8c8ddd`，SHA 与远程一致，GitHub 页面确认内容已同步。
 
 ### 经验教训
 
 1. **对同一文件做 ≥ 3 处修改时，不要用 SearchReplace 逐次修改**，应先用 Read 读取全文，在内存中完成所有修改，再用 Write 一次性写入。
 2. 文件修改后立即用 `git diff` 验证 Git 是否感知到变更。
-3. 如果 `git diff` 为空但文件内容确实变了，不要纠结调试 Git 状态，**直接 Write 完整重写整个文件**是最高效的恢复方式。
+3. 如果 `git diff` 为空但文件内容确实变了，使用 `git hash-object <file>` 对比工作区和 HEAD 的哈希确认差异。
+4. **终极方案**：`git update-index --really-refresh <file>` 可以强制 Git 重新扫描文件，跳过 stat 缓存。
 
 ### 已落地规则
 
