@@ -260,6 +260,7 @@ vim conf/sip_server.conf
 
 | 时间 | 版本 | 内容 |
 |------|------|------|
+| 2026-05-18 22:30 | v0.1.0 | 修复 ISSUES_LOG.md 问题 #2 缺失 — Git blob 未实际更新，git rm --cached 后重建推送 |
 | 2026-05-18 22:15 | v0.1.0 | 修复 README.md UTF-8 BOM 编码问题，解决 GitHub 页面中文乱码 |
 | 2026-05-18 21:00 | v0.1.0 | 新增项目规则文件 (.trae/rules/project_rules.md) 与问题记录日志 (ISSUES_LOG.md)，建立项目知识库备份 |
 | 2026-05-18 20:45 | v0.1.0 | README 格式规范化，补充开发工具信息（Trae Solo IDE、DeepSeek V4 PRO LLM） |
