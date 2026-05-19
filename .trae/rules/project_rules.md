@@ -2,10 +2,30 @@
 
 ## 版本管控规范
 
-1. 每完成一个功能节点，必须执行：`开发 → git add → git commit → git push origin main`
-2. commit 信息格式：`feat:` / `fix:` / `docs:` / `refactor:` + 简要描述
-3. 每次 commit 同时在 README.md 的「开发进展」表格追加一行（时间戳 + 版本 + 内容）
-4. 远程仓库：https://github.com/Shockley-HUANG/call_center_sip_system_trae_solo__deepseek_v4_pro
+### Commit 前强制检查清单（必须逐项执行，缺一不可）
+
+**每次 `git commit` 之前，必须完成以下全部检查并更新对应文件：**
+
+| # | 检查项 | 目标文件 | 操作 |
+|---|--------|----------|------|
+| 1 | 开发进展追加 | **README.md** | 在「开发进展」表格**最顶部追加一行**（时间 + 版本 + 内容），禁止覆盖已有行 |
+| 2 | 任务状态同步 | **tasks.md** | 将本次已完成任务从「进行中」移至「已完成」，标注日期；新增条目到对应分类 |
+| 3 | 问题记录补充 | **ISSUES_LOG.md** | 若本次涉及新问题修复，追加完整问题记录（描述/根因/方案/教训） |
+| 4 | 设计文档同步 | **docs/*.md** | 若本次涉及架构/接口/业务规则变更，必须同步更新版本号和内容 |
+| 5 | UTF-8 BOM 验证 | 所有含中文文件 | 执行 PowerShell BOM 补写脚本，确认前3字节均为 `239 187 191` |
+| 6 | Git 变更确认 | `git status` | 确认所有变更文件已 `git add`，无遗漏；确认无意外文件被修改 |
+
+**执行顺序**：先完成 1-5 的文件更新 → 再执行 6 确认 → 最后 commit + push。
+
+**违规后果**：若 commit 后发现有文件未更新，必须立即补更并重新 commit，禁止拖延到下一个迭代。
+
+### Commit 信息格式
+
+`feat:` / `fix:` / `docs:` / `refactor:` + 简要描述
+
+### 远程仓库
+
+https://github.com/Shockley-HUANG/call_center_sip_system_trae_solo__deepseek_v4_pro
 
 ## 文件编码规范（重要）
 
