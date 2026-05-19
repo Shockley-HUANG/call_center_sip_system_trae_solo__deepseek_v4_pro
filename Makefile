@@ -120,7 +120,13 @@ distclean: clean
 run: all
 	@echo "$(GREEN)[RUN] 启动 SIP Server...$(RESET)"
 	@echo ""
-	@cd $(CURDIR) && $(TARGET)
+	@LANG=zh_CN.UTF-8 $(TARGET)
+
+.PHONY: demo
+demo: all
+	@echo "$(GREEN)[DEMO] 运行 Demo 测试 (3秒自动退出)...$(RESET)"
+	@echo ""
+	@echo "a" | LANG=zh_CN.UTF-8 timeout 5 $(TARGET) 2>&1; exit 0
 
 # ============================================================
 #  调试模式
@@ -165,7 +171,8 @@ help:
 	@echo "$(CYAN)============================================================$(RESET)"
 	@echo ""
 	@echo "$(GREEN)make$(RESET)                编译项目"
-	@echo "$(GREEN)make run$(RESET)             编译 + 运行"
+	@echo "$(GREEN)make run$(RESET)             编译 + 运行 (UTF-8)"
+	@echo "$(GREEN)make demo$(RESET)            编译 + Demo测试 (自动退出)"
 	@echo "$(GREEN)make clean$(RESET)           清理编译产物"
 	@echo "$(GREEN)make distclean$(RESET)       清理编译产物和日志"
 	@echo "$(GREEN)make debug$(RESET)           调试模式编译"

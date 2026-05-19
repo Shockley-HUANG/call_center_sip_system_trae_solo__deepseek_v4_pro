@@ -1,4 +1,4 @@
-/*
+﻿/*
  * common_types.h — 呼叫中心系统全局类型定义
  * ============================================================
  * 本文件定义了整个呼叫中心系统中所有模块共享的数据结构、
@@ -134,6 +134,11 @@ typedef enum {
     ROUTE_RESULT_DEPT_FULL,            /* 目标部门坐席全忙 */
     ROUTE_RESULT_AGENT_OFFLINE,        /* 目标坐席离线 */
     ROUTE_RESULT_FALLBACK_AGENT,       /* 已转入人工兜底（9000） */
+    ROUTE_RESULT_QUEUED        = 5,    /* 已进入排队队列 */
+    ROUTE_RESULT_NIGHT_MODE,           /* 非工作时段夜间模式 */
+    ROUTE_RESULT_VOICEMAIL,            /* 无值班坐席，转入留言 */
+    ROUTE_RESULT_TIMEOUT_RETRY,        /* 超时重试引导 */
+    ROUTE_RESULT_INVALID_KEY_RETRY,    /* 无效按键重新引导 */
     ROUTE_RESULT_ERROR         = 99,   /* 未知错误 */
 } route_result_t;
 

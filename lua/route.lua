@@ -1,452 +1,873 @@
---
--- route.lua — 千人企业呼叫中心路由脚本
+﻿--
+-- route.lua -- 企业400呼叫中心全场景商用路由脚本 (V2.0)
 -- ============================================================
--- 本项目核心业务逻辑脚本，由 C 程序在每通电话到达时调用。
+-- 迭代2：从基础路由升级为全场景商用路由能力
+-- 覆盖：400IVR导航 / 内外双模路由 / 坐席状态管理 / 全忙溢出
+--        / 排队策略 / 工作日时段判断 / 夜间兜底 / 无效按键容错
+--        / 超时无操作兜底 / 留言提示 / 热配置
 --
--- 职责：
---   1. 外部 400 总机 IVR 按键导航（设计方案 3.2 节）
---   2. 部门分机号段匹配与路由（设计方案 2.2 节）
---   3. 内/外权限隔离（设计方案 5.2 节）
---   4. 24h 人工服务台兜底（设计方案 4.3 节）
---   5. 坐席全忙溢出策略（设计方案 7.3 节）
+-- C <-> Lua 接口：
+--   C 侧 route_call(caller_id, digits) -- 主入口（兼容旧版）
+--   7个标准化接口供 C 层通过 lua_vm_route_dispatch() 调用
 --
--- C ↔ Lua 接口：
---   C 侧调用：
---     lua_vm_call_route(vm, caller_id, digits, &response)
---       → 触发本脚本的 route_call(caller_id, digits)
---       → 返回 table { code, target, department, description }
---       → C 侧解析 table 字段到 route_response_t 结构体
---
--- 热更新：
---   本脚本支持不重启 C 服务直接更新。
---   修改后调用 lua_vm_reload_script(vm) 即可生效。
---   重载失败时旧脚本状态不受影响。
---
--- 对应设计方案：
---   第二章：企业组织与分机整体规划（部门 + 号段）
---   第三章：对外 400 总机系统设计（IVR 按键映射）
---   第四章：24h 人工服务台设计（兜底策略）
---   第五章：内部通话规则设计（分机互拨 + 权限）
---   第七章：完整呼叫流转全流程
+-- 热更新：修改后 lua_vm_reload_script() 即可生效，无需重启 C 服务
 --
 
 -- ============================================================
--- 一、全局常量定义
--- ------------------------------------------------------------
--- 这些常量定义了呼叫中心的核心运行参数，可在运行期间
--- 通过 lua_vm_get_global_int / lua_vm_get_global_string 读取。
+-- 一、可配置参数中心 -- ROUTE_CONFIG
 -- ============================================================
+local ROUTE_CONFIG = {
+    -- IVR 超时（秒）
+    ivr_timeout = 5,
 
--- IVR 语音导航超时时间（秒）
--- 客户在语音播报结束后 10 秒内未按键，自动转入人工兜底。
-local IVR_TIMEOUT = 10
+    -- 外呼总机号码
+    external_gateway = "400-123-4567",
 
--- 24小时人工服务台兜底号码
--- 所有异常场景（超时/无效按键/全忙溢出）均转入此号码。
-local FALLBACK_AGENT = "9000"
+    -- 人工兜底号码
+    fallback_agent = "9000",
 
--- 对外统一 400 总机号码
--- 匹配设计方案 3.1 节：400-123-4567
-local EXTERNAL_GATEWAY = "400-123-4567"
+    -- 无效按键连续错误上限
+    max_invalid_keys = 3,
+
+    -- 排队最大人数
+    max_queue_size = 10,
+
+    -- 排队超时（秒）
+    queue_timeout = 60,
+
+    -- 工作日时段（24小时制）
+    work_hours = {
+        start_hour = 8,
+        start_minute = 0,
+        end_hour = 18,
+        end_minute = 0,
+    },
+
+    -- 工作日（1=周一, 7=周日）
+    work_days = { true, true, true, true, true, false, false },
+
+    -- 夜间值班部门
+    night_duty_dept = "support",
+
+    -- 留言语音文件标识
+    voicemail_prompt = "voicemail_no_agent",
+
+    -- 溢出优先级（从高到低）
+    overflow_priority = { "support", "sales", "service", "market" },
+}
 
 -- ============================================================
--- 二、部门配置表 — DEPARTMENTS
--- ------------------------------------------------------------
--- 定义企业 9 个部门的完整信息，严格对齐设计方案 2.2 节。
---
--- 每个部门字段说明：
---   short       — 部门总机短号（外人拨此号码直达部门队列）
---   range_start — 员工分机号段起始
---   range_end   — 员工分机号段结束
---   name        — 部门中文名称
---   external    — 是否对外暴露（false=仅内部可拨，true=外部可通过 IVR 访问）
---
--- 内外部权限隔离规则（5.2 节）：
---   external = true  → 对外开放（销售 / 售后 / 市场 / 人工台）
---   external = false → 仅内部可拨（人事 / 财务 / 行政 / 管理层 / 研发）
+-- 二、部门资源配置 -- DEPARTMENTS
 -- ============================================================
 local DEPARTMENTS = {
-    -- ============ 职能后台部门（对内，外部不可直拨）============
     hr         = { short = "1000", range_start = 1001, range_end = 1050,
-                   name = "人事部",     external = false },
+                   name = "人事部",     external = false, ivr_key = nil },
     finance    = { short = "1100", range_start = 1101, range_end = 1150,
-                   name = "财务部",     external = false },
+                   name = "财务部",     external = false, ivr_key = nil },
     admin      = { short = "1200", range_start = 1201, range_end = 1250,
-                   name = "行政部",     external = false },
+                   name = "行政部",     external = false, ivr_key = nil },
     management = { short = "1300", range_start = 1301, range_end = 1330,
-                   name = "管理层",     external = false },
-
-    -- ============ 业务前端部门（对外）============
+                   name = "管理层",     external = false, ivr_key = nil },
     sales      = { short = "2000", range_start = 2001, range_end = 2400,
-                   name = "销售部",     external = true  },
+                   name = "销售部",     external = true,  ivr_key = "1" },
     service    = { short = "2500", range_start = 2501, range_end = 2800,
-                   name = "售后服务部", external = true  },
+                   name = "售后服务部", external = true,  ivr_key = "2" },
     market     = { short = "2900", range_start = 2901, range_end = 2980,
-                   name = "市场部",     external = true  },
-
-    -- ============ 技术部门（对内）============
+                   name = "市场部",     external = true,  ivr_key = "3" },
     rnd        = { short = "3000", range_start = 3001, range_end = 3200,
-                   name = "研发部",     external = false },
-
-    -- ============ 客服中心（24h人工服务台，对外）============
+                   name = "研发部",     external = false, ivr_key = nil },
     support    = { short = "9000", range_start = 9001, range_end = 9050,
-                   name = "人工服务台", external = true  },
+                   name = "人工服务台", external = true,  ivr_key = "0" },
 }
 
--- ============================================================
--- 三、IVR 按键映射表 — IVR_MAP
--- ------------------------------------------------------------
--- 将客户按键（1~4）映射到对应的部门 key。
--- 严格对齐设计方案 3.2 节「按键路由规则」：
---   1 → 销售部、2 → 售后服务部、3 → 市场部、4 → 人工服务台
--- ============================================================
-local IVR_MAP = {
-    ["1"] = "sales",     -- 按键1 → 销售部（2000号段）
-    ["2"] = "service",   -- 按键2 → 售后服务部（2500号段）
-    ["3"] = "market",    -- 按键3 → 市场部（2900号段）
-    ["4"] = "support",   -- 按键4 → 24小时人工服务台（9000号段）
-}
+-- IVR 按键映射表（从 DEPARTMENTS 的 ivr_key 自动构建）
+local IVR_MAP = {}
+for k, v in pairs(DEPARTMENTS) do
+    if v.ivr_key then
+        IVR_MAP[v.ivr_key] = k
+    end
+end
 
 -- ============================================================
--- 四、坐席状态表 — AGENT_STATUS
--- ------------------------------------------------------------
--- 当前为占位实现（空表 = 所有坐席视为在线）。
--- 后续对接 Redis 后，此表将从 Redis 实时同步坐席状态：
---   AGENT_STATUS["9001"] = { online = true, calls = 2, last_active = 123456789 }
---   AGENT_STATUS["9002"] = { online = false, calls = 0, last_active = 123450000 }
+-- 三、坐席状态管理 -- AGENT_STATUS
 -- ============================================================
+-- 状态：idle（空闲）/ talking（通话中）/ offline（离线）/ busy（忙碌）
+-- 格式：{ state = "idle", calls = 0, last_active = timestamp, extension = "9001" }
+-- 生产环境对接 Redis Hash 实时同步
 local AGENT_STATUS = {}
 
+-- 初始化所有坐席为空闲在线
+local function init_agent_status()
+    for dept_key, dept in pairs(DEPARTMENTS) do
+        for ext = dept.range_start, dept.range_end do
+            local ext_str = tostring(ext)
+            AGENT_STATUS[ext_str] = {
+                state = "idle",
+                calls = 0,
+                last_active = os.time(),
+                extension = ext_str,
+                department = dept_key,
+            }
+        end
+    end
+end
+
+-- 获取部门所有坐席状态列表
+local function get_dept_agents(dept_id)
+    local dept = DEPARTMENTS[dept_id]
+    if not dept then return {} end
+    local agents = {}
+    for ext = dept.range_start, dept.range_end do
+        local status = AGENT_STATUS[tostring(ext)]
+        if status then
+            table.insert(agents, status)
+        end
+    end
+    return agents
+end
+
+-- 获取部门空闲坐席数
+local function count_idle_agents(dept_id)
+    local count = 0
+    local agents = get_dept_agents(dept_id)
+    for _, a in ipairs(agents) do
+        if a.state == "idle" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- 获取一个空闲坐席（轮询分配--按最后活跃时间升序）
+local function pick_idle_agent(dept_id)
+    local agents = get_dept_agents(dept_id)
+    local idles = {}
+    for _, a in ipairs(agents) do
+        if a.state == "idle" then
+            table.insert(idles, a)
+        end
+    end
+    if #idles == 0 then return nil end
+    -- 按最后活跃时间升序（最久未接听的优先分配）
+    table.sort(idles, function(a, b) return a.last_active < b.last_active end)
+    return idles[1]
+end
+
+-- 标记坐席状态
+local function set_agent_state(extension, state)
+    local agent = AGENT_STATUS[extension]
+    if agent then
+        agent.state = state
+        agent.last_active = os.time()
+        if state == "talking" then
+            agent.calls = agent.calls + 1
+        elseif state == "idle" then
+            agent.calls = math.max(0, (agent.calls or 1) - 1)
+        end
+    end
+end
+
 -- ============================================================
--- 五、工具函数：find_department(extension)
--- ------------------------------------------------------------
--- 根据分机号查找对应的部门。
---
--- 遍历 DEPARTMENTS 表，检查分机号是否落在某个部门的号段范围内。
--- 时间复杂度 O(n)，n=部门数（9个），性能足够。
---
--- @param extension  分机号字符串（如 "2005"）
--- @return dept_key  部门 key（如 "sales"），未匹配返回 nil
--- @return dept      部门配置表，未匹配返回 nil
---
--- 示例：
---   find_department("2005") → "sales", { short="2000", ... }
---   find_department("9999") → nil, nil
+-- 四、排队队列管理 -- QUEUE
 -- ============================================================
+-- 按部门维护：QUEUE["sales"] = { {caller, arrival_time}, ... }
+local QUEUE = {}
+
+local function queue_push(dept_id, caller_id)
+    if not QUEUE[dept_id] then QUEUE[dept_id] = {} end
+    local q = QUEUE[dept_id]
+    if #q >= ROUTE_CONFIG.max_queue_size then
+        return false -- 队列满
+    end
+    table.insert(q, { caller = caller_id, arrival = os.time() })
+    return true
+end
+
+local function queue_pop(dept_id)
+    local q = QUEUE[dept_id]
+    if not q or #q == 0 then return nil end
+    return table.remove(q, 1)
+end
+
+local function queue_size(dept_id)
+    local q = QUEUE[dept_id]
+    return q and #q or 0
+end
+
+-- 清理超时排队项
+local function queue_cleanup()
+    local now = os.time()
+    for dept_id, q in pairs(QUEUE) do
+        local i = 1
+        while i <= #q do
+            if now - q[i].arrival > ROUTE_CONFIG.queue_timeout then
+                table.remove(q, i)
+            else
+                i = i + 1
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- 五、时段判断 -- WORKTIME
+-- ============================================================
+-- 返回 true=工作时段, false=非工作时段
+local function is_work_time()
+    local cfg = ROUTE_CONFIG.work_hours
+    local now = os.date("*t")
+    -- 先判断星期
+    local wday = now.wday -- 1=周日, 2=周一 ... 7=周六
+    local day_idx = wday == 1 and 7 or (wday - 1) -- 转为 1=周一
+    if not ROUTE_CONFIG.work_days[day_idx] then
+        return false
+    end
+    -- 判断时间
+    local now_mins = now.hour * 60 + now.min
+    local start_mins = cfg.start_hour * 60 + cfg.start_minute
+    local end_mins = cfg.end_hour * 60 + cfg.end_minute
+    return now_mins >= start_mins and now_mins < end_mins
+end
+
+-- 获取当前时间描述
+local function get_time_description()
+    local now = os.date("*t")
+    if is_work_time() then
+        return string.format("工作日 %02d:%02d (工作时段)", now.hour, now.min)
+    else
+        return string.format("非工作日 %02d:%02d (夜间/休息时段)", now.hour, now.min)
+    end
+end
+
+-- ============================================================
+-- 六、服务日志
+-- ============================================================
+-- 呼叫日志缓冲区（环形），生产环境对接文件或数据库
+local CALL_LOG = {}
+local CALL_LOG_INDEX = 0
+local CALL_LOG_MAX = 100
+
+local function log_call(level, caller_id, event, detail)
+    CALL_LOG_INDEX = CALL_LOG_INDEX % CALL_LOG_MAX + 1
+    CALL_LOG[CALL_LOG_INDEX] = {
+        time = os.time(),
+        level = level or "INFO",
+        caller = caller_id or "unknown",
+        event = event or "",
+        detail = detail or "",
+    }
+    print(string.format("[route][%s] caller=%s event=%s detail=%s",
+        level, caller_id, event, detail))
+end
+
+local function get_recent_logs(n)
+    n = n or 10
+    local logs = {}
+    local start = math.max(1, CALL_LOG_INDEX - n + 1)
+    for i = start, CALL_LOG_INDEX do
+        if CALL_LOG[i] then
+            table.insert(logs, CALL_LOG[i])
+        end
+    end
+    for i = 1, CALL_LOG_INDEX + n - CALL_LOG_MAX - 1 do
+        if i <= CALL_LOG_MAX and CALL_LOG[i] then
+            table.insert(logs, CALL_LOG[i])
+        end
+    end
+    return logs
+end
+
+-- ============================================================
+-- 七、通用工具
+-- ============================================================
+local function make_response(code, target, department, description)
+    return {
+        code = code,
+        target = target or "",
+        department = department or "",
+        description = description or "",
+    }
+end
+
 local function find_department(extension)
-    -- 将字符串转为数字，方便号段范围比较
     local ext_num = tonumber(extension)
     if not ext_num then return nil end
-
-    -- 遍历所有部门，检查分机号是否在号段范围内
     for dept_key, dept in pairs(DEPARTMENTS) do
         if ext_num >= dept.range_start and ext_num <= dept.range_end then
             return dept_key, dept
         end
     end
-    -- 未匹配任何部门
     return nil
 end
 
--- ============================================================
--- 六、工具函数：is_external_caller(caller_id)
--- ------------------------------------------------------------
--- 判断来电是否为外部来电。
---
--- 判断逻辑（按优先级）：
---   1. caller_id 为空或空字符串 → 外部（未知来电）
---   2. caller_id 以 "400" 开头 → 外部（400 总机呼入）
---   3. caller_id 不是纯数字或不在 1000~9999 范围 → 外部
---   4. caller_id 不在任何部门号段内 → 外部
---   5. 以上都不满足 → 内部（合法分机）
---
--- @param caller_id  主叫号码（C 程序传入）
--- @return true=外部来电（需 IVR 导航）, false=内部来电（分机直拨）
--- ============================================================
 local function is_external_caller(caller_id)
-    -- 规则1: 空身份 = 外部来电
     if not caller_id or caller_id == "" then
         return true
     end
-
-    -- 规则2: 400 开头 = 外部总机呼入
-    -- 匹配 "4001234567" 或 "400-123-4567" 开头
     if string.sub(caller_id, 1, 3) == "400" then
         return true
     end
-
-    -- 规则3: 非 4 位数字分机格式 → 外部
     local caller_num = tonumber(caller_id)
     if not caller_num or caller_num < 1000 or caller_num > 9999 then
         return true
     end
-
-    -- 规则4: 不在企业任何部门号段内 → 外部
-    -- 即使格式像分机，但不在合法号段内也视为外部
     for _, dept in pairs(DEPARTMENTS) do
         if caller_num >= dept.range_start and caller_num <= dept.range_end then
-            return false  -- 找到匹配：确认为内部员工
+            return false
         end
     end
-
-    -- 最终兜底：视为外部
     return true
 end
 
--- ============================================================
--- 七、工具函数：make_response(code, target, department, description)
--- ------------------------------------------------------------
--- 构建标准路由响应 table，供 C 程序解析。
---
--- 返回的 table 会被 lua_vm_call_route() 逐字段提取到
--- route_response_t C 结构体：
---   { code = 0, target = "2000", department = "销售部",
---     description = "..." }
---       ↓  逐字段 lua_getfield 提取
---   C: route_response_t { .code=0, .target_extension="2000", ... }
---
--- @param code        路由结果码（对应 route_result_t 枚举）
---                        0=成功, 1=无效号码, 2=部门全忙, 4=人工兜底
--- @param target      目标分机/部门短号
--- @param department  目标部门名称（日志可读性）
--- @param description 路由过程描述（调试/日志用）
--- @return table      { code, target, department, description }
--- ============================================================
-local function make_response(code, target, department, description)
-    return {
-        code = code,
-        target = target or "",                -- nil 保护：缺省传空字符串
-        department = department or "",
-        description = description or ""
-    }
+-- 获取溢出目标部门
+local function find_overflow_dept(exclude_dept)
+    for _, dept_key in ipairs(ROUTE_CONFIG.overflow_priority) do
+        if dept_key ~= exclude_dept then
+            local idle_count = count_idle_agents(dept_key)
+            if idle_count > 0 then
+                return DEPARTMENTS[dept_key], dept_key
+            end
+        end
+    end
+    return nil, nil
 end
 
 -- ============================================================
--- 八、核心路由入口：route_call(caller_id, digits)
--- ------------------------------------------------------------
--- ★ 这是 C 程序调用的入口函数，是整个路由决策的总控。
---
--- 决策流程：
---   1. 调用 is_external_caller() 判断内外
---   2. 外部来电 → route_external_call()（IVR 导航 + 人工兜底）
---   3. 内部来电 → route_internal_call()（分机号匹配 + 权限校验）
---
--- @param caller_id  主叫号码（外部为 "4001234567"，内部为 "1001"）
--- @param digits     IVR 按键（"1"/"2"/"3"/"4"）或内部分机号（"2001"）
--- @return table     { code, target, department, description }
+-- 八、7大核心路由接口
 -- ============================================================
-function route_call(caller_id, digits)
-    -- 步骤1: 判断来电是外部还是内部
-    local external = is_external_caller(caller_id)
 
-    -- 步骤2: 根据来电类型分发到对应的路由函数
-    if external then
-        -- 外部来电 → 走 IVR 导航流程
-        return route_external_call(caller_id, digits)
+-- [接口1] IVR 按键路由分发
+-- @param phone     主叫号码（外部400来电）
+-- @param key_input 用户按键（"1"/"2"/"3"/"0"）
+-- @return route_response_t
+function get_ivr_route(phone, key_input)
+    log_call("INFO", phone, "get_ivr_route", "key=" .. (key_input or "nil"))
+
+    -- 空输入 = 超时
+    if not key_input or key_input == "" then
+        return timeout_fallback(phone)
     end
 
-    -- 内部来电 → 分机直拨流程
-    return route_internal_call(caller_id, digits)
+    local dept_key = IVR_MAP[key_input]
+    if not dept_key then
+        return invalid_key_fallback(phone, key_input)
+    end
+
+    local dept = DEPARTMENTS[dept_key]
+    if not dept or not dept.external then
+        return make_response(
+            4, -- FALLBACK_AGENT
+            ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            "IVR按键[" .. key_input .. "] 部门不可对外访问，转接人工台"
+        )
+    end
+
+    -- 检查部门坐席状态
+    local status = check_agent_status(dept_key)
+    if status.code == 2 then -- DEPT_FULL
+        return overflow_route(dept_key, phone)
+    elseif status.code == 3 then -- AGENT_OFFLINE
+        return make_response(
+            3, -- AGENT_OFFLINE
+            ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            dept.name .. "无空闲坐席在线，转接人工台"
+        )
+    end
+
+    -- 空闲坐席负载均衡
+    local agent = pick_idle_agent(dept_key)
+    local target_ext = agent and agent.extension or dept.short
+
+    return make_response(
+        0, -- SUCCESS
+        target_ext,
+        dept.name,
+        "IVR按键[" .. key_input .. "] → 转接" .. dept.name .. "坐席(" .. target_ext .. ")"
+    )
 end
 
--- ============================================================
--- 九、外部来电路由：route_external_call(caller_id, digits)
--- ------------------------------------------------------------
--- 处理所有通过 400 总机接入的外部来电。
---
--- 路由优先级（从高到低）：
---   1. 超时未操作（digits 为空）→ 人工兜底（设计 3.2 节）
---   2. 部门全忙溢出（digits 含 ":full" 后缀）→ 人工兜底（设计 4.3 节）
---   3. IVR 按键匹配（1/2/3/4）→ 转接对应部门队列（设计 3.2 节）
---   4. 未匹配任何规则 → 人工兜底（设计 7.3 节）
---
--- 权限检查：只有 external = true 的部门才能被外部访问。
---   如果按 "2" 映射到 "service"，而 service.external = true → 通过
---   如果按了某个键映射到 external=false 的部门（当前设计不存在此情况）→ 兜底
---
--- @param caller_id  主叫号码（外部号码）
--- @param digits     IVR 按键
--- @return table     { code, target, department, description }
--- ============================================================
-function route_external_call(caller_id, digits)
-    -- 分支1: 超时未操作（digits 为空或 nil）
-    -- 对应设计方案 3.2 节：「超时 10 秒未操作 → 自动转入人工服务台兜底」
-    if not digits or digits == "" then
-        return make_response(
-            4,                          -- code: FALLBACK_AGENT
-            FALLBACK_AGENT,             -- target: "9000"
-            "人工服务台",
-            "IVR超时未操作，自动转入24小时人工服务台"
-        )
+-- [接口2] 部门坐席状态检测
+-- @param dept_id  部门 key（如 "sales"）
+-- @return route_response_t (code=0有闲/2全忙/3全离线)
+function check_agent_status(dept_id)
+    queue_cleanup()
+    local dept = DEPARTMENTS[dept_id]
+    if not dept then
+        return make_response(99, "", "", "部门[" .. tostring(dept_id) .. "]不存在")
     end
 
-    -- 分支2: 模拟部门坐席全满（digits 含 ":full" 后缀）
-    -- 对应设计方案 4.3 节：「部门坐席全忙，排队溢出转入人工」
-    -- 此分支用于 Demo 测试，生产环境将从 Redis 队列溢出事件触发
-    if string.find(digits, ":full") then
-        -- 从 "1:full" 中提取真实按键 "1"
-        local real_digits = string.match(digits, "^(%d+)")
-        local ivr_key = IVR_MAP[real_digits]     -- 查找部门 key
-        local dept = DEPARTMENTS[ivr_key]         -- 获取部门配置
-        local dept_name = dept and dept.name or "未知部门"
-        return make_response(
-            2,                          -- code: DEPT_FULL
-            FALLBACK_AGENT,
-            "人工服务台",
-            dept_name .. "坐席全忙，溢出转入人工服务台"
-        )
-    end
+    local agents = get_dept_agents(dept_id)
+    local total = #agents
+    local idle = 0
+    local talking = 0
+    local offline = 0
+    local busy = 0
 
-    -- 分支3: IVR 按键匹配
-    -- 对应设计方案 3.2 节「按键路由规则」
-    local dept_key = IVR_MAP[digits]   -- 按键 → 部门 key（如 "1" → "sales"）
-    if dept_key then
-        local dept = DEPARTMENTS[dept_key]  -- 获取部门配置
-        -- 权限检查：只有对外部门才能通过 IVR 接入
-        if dept and dept.external then
-            return make_response(
-                0,                      -- code: SUCCESS
-                dept.short,             -- target: 部门短号（如 "2000"）
-                dept.name,
-                "IVR按键[" .. digits .. "] → 转接" .. dept.name ..
-                "队列（" .. dept.short .. "号段）"
-            )
+    for _, a in ipairs(agents) do
+        if a.state == "idle" then idle = idle + 1
+        elseif a.state == "talking" then talking = talking + 1
+        elseif a.state == "busy" then busy = busy + 1
+        else offline = offline + 1
         end
     end
 
-    -- 分支4: 未匹配任何规则 → 人工兜底
-    -- 对应设计方案 7.3 节：「无按键、按键错误→统一转入人工台」
-    return make_response(
-        1,                              -- code: INVALID_DIGITS
-        FALLBACK_AGENT,
-        "人工服务台",
-        "无效按键[" .. digits .. "]，转接24小时人工服务台"
-    )
-end
-
--- ============================================================
--- 十、内部员工通话路由：route_internal_call(caller_id, digits)
--- ------------------------------------------------------------
--- 处理企业内部分机之间的通话。
---
--- 路由流程：
---   1. 解析被叫号码是否为有效数字
---   2. 查找被叫分机所属部门
---   3. 查找主叫分机所属部门（用于日志描述）
---   4. 构建路由响应，返回目标分机
---
--- @param caller_id  主叫分机号（如 "1001"）
--- @param digits     被叫分机号（如 "2005"）
--- @return table     { code, target, department, description }
--- ============================================================
-function route_internal_call(caller_id, digits)
-    -- 步骤1: 解析主叫分机号（用于日志描述）
-    local caller_ext = tonumber(caller_id)
-
-    -- 步骤2: 校验被叫分机号是否为有效数字
-    local callee_num = tonumber(digits)
-    if not callee_num then
+    local online = total - offline
+    if online == 0 then
         return make_response(
-            1,                          -- code: INVALID_DIGITS
-            FALLBACK_AGENT,
-            "人工服务台",
-            "无效分机号[" .. tostring(digits) .. "]，无法接通"
+            3, -- AGENT_OFFLINE
+            dept.short,
+            dept.name,
+            string.format("%s 全部离线 (总%d/在线0/空闲0)",
+                dept.name, total)
         )
     end
 
-    -- 步骤3: 查找被叫分机所属部门
-    local callee_dept_key, callee_dept = find_department(digits)
+    if idle == 0 then
+        return make_response(
+            2, -- DEPT_FULL
+            dept.short,
+            dept.name,
+            string.format("%s 坐席全忙 (总%d/在线%d/通话%d/忙碌%d)",
+                dept.name, total, online, talking, busy)
+        )
+    end
+
+    return make_response(
+        0, -- SUCCESS
+        dept.short,
+        dept.name,
+        string.format("%s 有空闲坐席 (总%d/在线%d/空闲%d/通话%d)",
+            dept.name, total, online, idle, talking)
+    )
+end
+
+-- [接口3] 坐席全忙溢出路由
+-- @param dept_id        全忙部门 key
+-- @param caller_id      主叫号码（可选，用于排队）
+-- @return route_response_t
+function overflow_route(dept_id, caller_id)
+    caller_id = caller_id or ""
+    local dept = DEPARTMENTS[dept_id]
+    local dept_name = dept and dept.name or tostring(dept_id)
+
+    log_call("WARN", caller_id, "overflow", "部门[" .. dept_name .. "]全忙溢出")
+
+    -- 策略1：溢出到公共人工组
+    local idle_support = count_idle_agents("support")
+    if idle_support > 0 then
+        local agent = pick_idle_agent("support")
+        return make_response(
+            4, -- FALLBACK_AGENT
+            agent and agent.extension or ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            dept_name .. "坐席全忙，溢出转入人工服务台坐席"
+        )
+    end
+
+    -- 策略2：按优先级溢出到其他对外部门
+    local overflow_dept, ok = find_overflow_dept(dept_id)
+    if overflow_dept and ok then
+        local agent = pick_idle_agent(ok)
+        return make_response(
+            4, -- FALLBACK_AGENT
+            agent and agent.extension or overflow_dept.short,
+            overflow_dept.name,
+            dept_name .. "坐席全忙，优先溢出至" .. overflow_dept.name
+        )
+    end
+
+    -- 策略3：所有对外部门全忙 -- 进入排队
+    if queue_push(dept_id, caller_id) then
+        local pos = queue_size(dept_id)
+        return make_response(
+            5, -- QUEUED
+            dept.short,
+            dept_name,
+            string.format("所有部门全忙，已进入排队队列 (位置:%d/%d)，预计等待%d秒",
+                pos, ROUTE_CONFIG.max_queue_size, pos * 30)
+        )
+    end
+
+    -- 策略4：排队也满了 -- 留言
+    log_call("ERROR", caller_id, "queue_full", "排队已满")
+    return make_response(
+        7, -- VOICEMAIL
+        "",
+        dept_name,
+        "当前排队人数已满，请稍后再拨或留言，我们将尽快回电"
+    )
+end
+
+-- [接口4] 时段判断+夜间兜底路由
+-- @return route_response_t
+function time_judge_route()
+    if is_work_time() then
+        return make_response(
+            0, -- SUCCESS
+            "",
+            "",
+            "工作日时段，使用标准路由策略"
+        )
+    end
+
+    local time_desc = get_time_description()
+    -- 非工作时段 → 检查值班人工
+    local night_dept = ROUTE_CONFIG.night_duty_dept
+    local agents = get_dept_agents(night_dept)
+    local has_duty = false
+    for _, a in ipairs(agents) do
+        if a.state == "idle" or a.state == "talking" then
+            has_duty = true
+            break
+        end
+    end
+
+    if has_duty then
+        local agent = pick_idle_agent(night_dept)
+        if agent then
+            return make_response(
+                6, -- NIGHT_MODE
+                agent.extension,
+                DEPARTMENTS[night_dept].name,
+                time_desc .. " 夜间模式，转接值班人工坐席(" .. agent.extension .. ")"
+            )
+        end
+        return make_response(
+            6, -- NIGHT_MODE
+            ROUTE_CONFIG.fallback_agent,
+            DEPARTMENTS[night_dept].name,
+            time_desc .. " 夜间模式，值班坐席全忙，请稍候"
+        )
+    end
+
+    -- 无值班坐席 → 留言提示
+    log_call("WARN", "system", "no_night_duty", "夜间无值班坐席")
+    return make_response(
+        7, -- VOICEMAIL
+        "",
+        "",
+        time_desc .. " 当前为非工作时段，暂无值班坐席，请留言，工作时间将尽快回复"
+    )
+end
+
+-- [接口5] 无效按键容错兜底
+-- @param caller_id  主叫号码
+-- @param key_input  无效按键值
+-- @return route_response_t
+-- 全局累计错误计数（按 caller_id）
+local INVALID_KEY_COUNT = {}
+
+function invalid_key_fallback(caller_id, key_input)
+    caller_id = caller_id or "unknown"
+    key_input = key_input or "nil"
+
+    INVALID_KEY_COUNT[caller_id] = (INVALID_KEY_COUNT[caller_id] or 0) + 1
+    local err_count = INVALID_KEY_COUNT[caller_id]
+    local max_err = ROUTE_CONFIG.max_invalid_keys
+
+    log_call("WARN", caller_id, "invalid_key",
+        "key=" .. key_input .. " count=" .. err_count .. "/" .. max_err)
+
+    if err_count >= max_err then
+        -- 超限 → 转人工
+        INVALID_KEY_COUNT[caller_id] = 0 -- 重置计数
+        local agent = pick_idle_agent("support")
+        return make_response(
+            4, -- FALLBACK_AGENT
+            agent and agent.extension or ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            string.format("连续%d次无效按键(最后:[%s])，自动转接人工坐席",
+                err_count, key_input)
+        )
+    end
+
+    -- 未超限 → 重新引导
+    return make_response(
+        9, -- INVALID_KEY_RETRY
+        "",
+        "",
+        string.format("按键[%s]无效(第%d/%d次)，请重新选择：" ..
+            "1-销售咨询 2-售后服务 3-市场合作 0-人工客服",
+            key_input, err_count, max_err)
+    )
+end
+
+-- [接口6] 超时无操作兜底
+-- @param caller_id  主叫号码
+-- @return route_response_t
+local TIMEOUT_RETRY_COUNT = {}
+
+function timeout_fallback(caller_id)
+    caller_id = caller_id or "unknown"
+
+    TIMEOUT_RETRY_COUNT[caller_id] = (TIMEOUT_RETRY_COUNT[caller_id] or 0) + 1
+    local retry = TIMEOUT_RETRY_COUNT[caller_id]
+
+    log_call("INFO", caller_id, "timeout", "retry=" .. retry)
+
+    if retry >= 2 then
+        -- 二次超时 → 人工兜底
+        TIMEOUT_RETRY_COUNT[caller_id] = 0
+        local agent = pick_idle_agent("support")
+        return make_response(
+            4, -- FALLBACK_AGENT
+            agent and agent.extension or ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            "连续" .. retry .. "次超时无操作，自动转入人工坐席"
+        )
+    end
+
+    -- 首次超时 → 重试引导
+    return make_response(
+        8, -- TIMEOUT_RETRY
+        "",
+        "",
+        string.format("超时未操作(第%d次)，%d秒后重试引导..." ..
+            "请按键选择：1-销售咨询 2-售后服务 3-市场合作 0-人工客服",
+            retry, ROUTE_CONFIG.ivr_timeout)
+    )
+end
+
+-- [接口7] 内部分机互呼路由
+-- @param caller  主叫分机号
+-- @param callee  被叫分机号
+-- @return route_response_t
+function dept_internal_call_route(caller, callee)
+    log_call("INFO", caller, "internal_call", "to " .. callee)
+
+    -- 校验主叫
+    local caller_dept_key, caller_dept = find_department(caller)
+    if not caller_dept then
+        return make_response(
+            1, -- INVALID_DIGITS
+            ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            "主叫分机[" .. caller .. "]无效，不在企业号段内"
+        )
+    end
+
+    -- 校验被叫
+    local callee_num = tonumber(callee)
+    if not callee_num or callee_num < 1000 or callee_num > 9999 then
+        return make_response(
+            1, -- INVALID_DIGITS
+            ROUTE_CONFIG.fallback_agent,
+            "人工服务台",
+            "被叫号码[" .. tostring(callee) .. "]格式无效"
+        )
+    end
+
+    local callee_dept_key, callee_dept = find_department(callee)
     if not callee_dept then
-        -- 被叫号码不在任何部门号段内
         return make_response(
             1,
-            FALLBACK_AGENT,
+            ROUTE_CONFIG.fallback_agent,
             "人工服务台",
-            "分机[" .. digits .. "]不在企业号段内，转接人工台"
+            "被叫分机[" .. callee .. "]不在企业号段内，转接人工台"
         )
     end
 
-    -- 步骤4: 查找主叫分机所属部门（用于生成描述信息）
-    local caller_dept_key, caller_dept = find_department(caller_id)
-    local caller_dept_name = caller_dept and caller_dept.name or "未知"
+    -- 检查被叫坐席在线状态
+    local callee_status = AGENT_STATUS[callee]
+    if callee_status and callee_status.state == "offline" then
+        return make_response(
+            3, -- AGENT_OFFLINE
+            callee_dept.short,
+            callee_dept.name,
+            "被叫分机[" .. callee .. "]当前离线，请稍后再拨"
+        )
+    end
 
-    -- 步骤5: 构建成功响应
-    -- 内部互拨不需要权限检查（设计方案 5.2 节：内部员工可拨打所有分机）
+    -- 坐席通话中
+    if callee_status and callee_status.state == "talking" then
+        return make_response(
+            2, -- DEPT_FULL (被叫正忙)
+            callee,
+            callee_dept.name,
+            "被叫分机[" .. callee .. "]正在通话中，请稍后再拨或留言"
+        )
+    end
+
+    -- 成功：直连被叫
     return make_response(
-        0,                              -- code: SUCCESS
-        digits,                         -- target: 被叫分机号
+        0, -- SUCCESS
+        callee,
         callee_dept.name,
-        "内部互拨: " .. caller_dept_name .. "(" .. caller_id .. ") → " ..
-        callee_dept.name .. "(" .. digits .. ")"
+        "内部互拨: " .. caller_dept.name .. "(" .. caller .. ") → " ..
+        callee_dept.name .. "(" .. callee .. ")"
     )
 end
 
 -- ============================================================
--- 十一、辅助接口函数
--- ------------------------------------------------------------
--- 以下函数供 C 程序通过 lua_vm_call_function() 调用，
--- 或供其他 Lua 脚本模块引用。
+-- 九、主入口（兼容旧版 C 调用）
+-- ============================================================
+function route_call(caller_id, digits)
+    local external = is_external_caller(caller_id)
+
+    if external then
+        -- 先做时段判断
+        local time_result = time_judge_route()
+        if time_result.code == 7 then
+            -- VOICEMAIL：非工作时段无值班，直接返回留言
+            return make_response(7, "", "",
+                get_time_description() .. " 非工作时段暂无人工服务，" ..
+                time_result.description)
+        end
+        if time_result.code == 6 then
+            -- NIGHT_MODE：夜间走值班路由
+            return time_result
+        end
+
+        -- 工作时段：走 IVR
+        return get_ivr_route(caller_id, digits)
+    end
+
+    -- 内部来电 → 分机直拨
+    return dept_internal_call_route(caller_id, digits)
+end
+
+-- ============================================================
+-- 十、辅助接口（供 C 程序 lua_vm_call_function 调用）
 -- ============================================================
 
---
--- 获取 IVR 语音导航文案
--- 对应设计方案 3.2 节「语音播报文案」
--- C 侧调用：lua_vm_call_function(vm, "get_ivr_prompt", NULL)
--- @return string  IVR 欢迎语文本
---
 function get_ivr_prompt()
     return "欢迎致电XX企业服务热线，按键选择对应服务：" ..
-           "1-销售咨询，2-售后服务，3-市场合作，4-人工客服，" ..
+           "1-销售咨询，2-售后服务，3-市场合作，0-人工客服，" ..
            "其他按键返回首页，全天候人工服务为您保驾护航。"
 end
 
---
--- 获取部门详细信息
--- C 侧调用：lua_vm_call_function(vm, "get_department_info", "s", "sales")
--- @param dept_key  部门 key（如 "sales"）
--- @return table    部门完整信息，不存在的部门返回 nil
---
 function get_department_info(dept_key)
     local dept = DEPARTMENTS[dept_key]
-    if not dept then
-        return nil
-    end
-    -- 返回一个包含统计信息的扩展 table
+    if not dept then return nil end
+    local idle = count_idle_agents(dept_key)
     return {
-        key         = dept_key,                   -- 部门 key
-        short       = dept.short,                 -- 总机短号
-        name        = dept.name,                  -- 中文名称
-        range_start = dept.range_start,           -- 号段起始
-        range_end   = dept.range_end,             -- 号段结束
-        external    = dept.external,              -- 是否对外
-        size        = dept.range_end - dept.range_start + 1,  -- 员工数
+        key = dept_key,
+        short = dept.short,
+        name = dept.name,
+        range_start = dept.range_start,
+        range_end = dept.range_end,
+        external = dept.external,
+        ivr_key = dept.ivr_key,
+        size = dept.range_end - dept.range_start + 1,
+        idle_agents = idle,
     }
 end
 
--- ============================================================
--- 十二、脚本加载信息输出
--- ------------------------------------------------------------
--- 以下代码在脚本被 luaL_loadfile + lua_pcall 执行时运行。
--- 相当于初始化打印，帮助运维人员确认脚本版本和配置正确。
--- 输出会同时出现在终端和日志文件中。
--- ============================================================
-print("[route.lua] 路由脚本已加载，版本: 1.0.0")
-print("[route.lua] 企业总机: " .. EXTERNAL_GATEWAY)
-print("[route.lua] 人工兜底: " .. FALLBACK_AGENT)
-print("[route.lua] IVR超时: " .. IVR_TIMEOUT .. "秒")
-print("[route.lua] 已注册部门: ")
-
--- 以表格形式打印所有部门信息
-for key, dept in pairs(DEPARTMENTS) do
-    -- 权限标识：对外 / 对内
-    local access = dept.external and "对外" or "对内"
-    print(string.format(
-        "  [%s] %-10s | 短号: %-4s | 号段: %04d-%04d | %-4s | %d人",
-        key, dept.name, dept.short,
-        dept.range_start, dept.range_end,
-        access,
-        dept.range_end - dept.range_start + 1   -- 部门人数
-    ))
+-- 获取所有对外部门 IVR 菜单
+function get_ivr_menu()
+    local menu = {}
+    for k, v in pairs(DEPARTMENTS) do
+        if v.external and v.ivr_key then
+            table.insert(menu, {
+                key = v.ivr_key,
+                name = v.name,
+                dept = k,
+            })
+        end
+    end
+    table.sort(menu, function(a, b) return a.key < b.key end)
+    return menu
 end
 
-print("[route.lua] route_call(caller_id, digits) 路由函数就绪")
+-- 获取当前系统工作时段状态
+function get_work_time_status()
+    local now = os.date("*t")
+    return {
+        is_work_time = is_work_time(),
+        time_desc = get_time_description(),
+        current_hour = now.hour,
+        current_minute = now.min,
+        work_start = string.format("%02d:%02d",
+            ROUTE_CONFIG.work_hours.start_hour,
+            ROUTE_CONFIG.work_hours.start_minute),
+        work_end = string.format("%02d:%02d",
+            ROUTE_CONFIG.work_hours.end_hour,
+            ROUTE_CONFIG.work_hours.end_minute),
+    }
+end
+
+-- 获取系统配置
+function get_route_config()
+    return {
+        ivr_timeout = ROUTE_CONFIG.ivr_timeout,
+        external_gateway = ROUTE_CONFIG.external_gateway,
+        fallback_agent = ROUTE_CONFIG.fallback_agent,
+        max_invalid_keys = ROUTE_CONFIG.max_invalid_keys,
+        max_queue_size = ROUTE_CONFIG.max_queue_size,
+        queue_timeout = ROUTE_CONFIG.queue_timeout,
+        work_hours = ROUTE_CONFIG.work_hours,
+        night_duty_dept = ROUTE_CONFIG.night_duty_dept,
+    }
+end
+
+-- 更新运行时配置（热更新）
+function update_route_config(new_config)
+    if not new_config then return false end
+    for k, v in pairs(new_config) do
+        if ROUTE_CONFIG[k] ~= nil then
+            ROUTE_CONFIG[k] = v
+        end
+    end
+    log_call("INFO", "system", "config_update", "运行时配置已更新")
+    return true
+end
+
+-- 获取最近呼叫日志
+function get_call_logs(n)
+    return get_recent_logs(n or 20)
+end
+
+-- 获取排队状态
+function get_queue_status()
+    local status = {}
+    for dept_id, q in pairs(QUEUE) do
+        status[dept_id] = {
+            size = #q,
+            max = ROUTE_CONFIG.max_queue_size,
+        }
+    end
+    return status
+end
+
+-- 重置无效按键计数（通话结束调用）
+function reset_invalid_key_count(caller_id)
+    INVALID_KEY_COUNT[caller_id] = 0
+    TIMEOUT_RETRY_COUNT[caller_id] = 0
+end
+
+-- ============================================================
+-- 十一、脚本加载输出
+-- ============================================================
+init_agent_status()
+
+print("[route.lua] ══════════════════════════════════════════════")
+print("[route.lua]  企业400呼叫中心路由脚本 V2.0 已加载")
+print("[route.lua]  迭代2 - 全场景商用路由能力")
+print("[route.lua] ══════════════════════════════════════════════")
+print(string.format("[route.lua]  外呼总机: %s", ROUTE_CONFIG.external_gateway))
+print(string.format("[route.lua]  人工兜底: %s", ROUTE_CONFIG.fallback_agent))
+print(string.format("[route.lua]  IVR超时: %ds | 无效按键上限: %d | 排队上限: %d",
+    ROUTE_CONFIG.ivr_timeout, ROUTE_CONFIG.max_invalid_keys,
+    ROUTE_CONFIG.max_queue_size))
+print(string.format("[route.lua]  工作时段: %02d:%02d - %02d:%02d (周一至周五)",
+    ROUTE_CONFIG.work_hours.start_hour, ROUTE_CONFIG.work_hours.start_minute,
+    ROUTE_CONFIG.work_hours.end_hour, ROUTE_CONFIG.work_hours.end_minute))
+print(string.format("[route.lua]  当前时间: %s", get_time_description()))
+print("[route.lua]  已注册部门及坐席:")
+for key, dept in pairs(DEPARTMENTS) do
+    local access = dept.external and "对外" or "对内"
+    local ivr_info = dept.ivr_key and ("IVR:" .. dept.ivr_key) or "---"
+    local idle = count_idle_agents(key)
+    print(string.format("    [%s] %-8s | 短号:%-4s | %-4s | %04d-%04d | %d人(闲%d)",
+        key, dept.name, dept.short, access .. "/" .. ivr_info,
+        dept.range_start, dept.range_end,
+        dept.range_end - dept.range_start + 1, idle))
+end
+print("[route.lua]  7个标准化路由接口已就绪:")
+print("[route.lua]    1. get_ivr_route          2. check_agent_status")
+print("[route.lua]    3. overflow_route         4. time_judge_route")
+print("[route.lua]    5. invalid_key_fallback   6. timeout_fallback")
+print("[route.lua]    7. dept_internal_call_route")
+print("[route.lua] ══════════════════════════════════════════════")

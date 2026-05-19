@@ -88,10 +88,51 @@ git push origin main
 - `git update-index --really-refresh`：**强制重新读取文件内容并计算哈希**，无视 stat 缓存
 - `--really-refresh` 比修改文件 mtime（`LastWriteTime`）、`git add -f` 等方案都更可靠
 
+## 终端中文编码规范（重要）
+
+### 规则：WSL 运行项目时必须设置 `LANG=zh_CN.UTF-8` 环境变量
+
+**原因**：在 Windows PowerShell 环境通过 WSL 运行 Linux 程序时，PowerShell 与 WSL 之间的管道传输默认使用系统编码（Windows 默认为 GBK/936），而 WSL 内程序输出为 UTF-8。编码不匹配导致所有中文字符在终端显示为乱码。
+
+**现象**：
+```
+# 乱码示例（PowerShell → WSL 管道）
+[DEBUG] Route dispatch: desc=閿€鍞儴 鏈夌┖闂插潗甯
+[route.lua]  宸ヤ綔鏃ユ椂娈碉紝浣跨敤鏍囧噯璺敱
+
+# 正常显示（WSL 内部 + LANG=zh_CN.UTF-8）
+[DEBUG] Route dispatch: desc=销售部 有空闲坐席
+[route.lua]  工作日时段，使用标准路由策略
+```
+
+**解决方案**：在 Makefile 的 `run` / `demo` 目标中添加 `LANG=zh_CN.UTF-8` 前缀：
+
+```makefile
+.PHONY: run
+run: all
+	@LANG=zh_CN.UTF-8 $(TARGET)
+
+.PHONY: demo
+demo: all
+	@echo "a" | LANG=zh_CN.UTF-8 timeout 5 $(TARGET) 2>&1; exit 0
+```
+
+**手动运行方式**：
+```bash
+# 在 WSL 内直接运行（推荐）
+LANG=zh_CN.UTF-8 ./build/sip_server
+
+# 从 PowerShell 进入 WSL 后再运行
+wsl -e bash -c "LANG=zh_CN.UTF-8 ./build/sip_server"
+```
+
+**重要提醒**：此规则永久生效。后续新增的任何涉及中文输出的运行命令，无论是 Makefile 目标还是手动命令，都必须包含 `LANG=zh_CN.UTF-8`。
+
 ## 构建与运行
 
 - 编译：`make`（生成 `build/sip_server`）
-- 运行：`make run`
+- 运行：`make run`（自动设置 LANG=zh_CN.UTF-8）
+- Demo：`make demo`（编译 + 运行6组测试，5秒后自动退出）
 - 清理：`make clean` / `make distclean`
 - 调试：`make debug` / `make gdb`
 

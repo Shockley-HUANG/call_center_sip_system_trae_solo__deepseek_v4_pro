@@ -1,4 +1,4 @@
-/*
+﻿/*
  * lua_utils.c — Lua 虚拟机封装层实现
  * ============================================================
  * 实现 lua_utils.h 中声明的所有接口，封装 Lua C API 的底层细节。
@@ -277,6 +277,99 @@ int lua_vm_call_route(lua_vm_t *vm, const char *caller_id,
     /* 记录路由结果到调试日志 */
     LOG_DEBUG("Route result: code=%d target=%s dept=%s desc=%s",
               response->code, response->target_extension,
+              response->department, response->description);
+
+    return response->code;
+}
+
+/*
+ * 通用路由调度：调用任意Lua函数并提取route_response_t
+ *
+ * 这是迭代2新增的核心函数，用于调用 lua/route.lua 中
+ * 暴露的7个标准化路由接口。内部复用 lua_vm_call_route()
+ * 的 table 提取逻辑，但支持任意函数名和可变参数。
+ *
+ * 调用流程：
+ *   1. 从全局表取出 func_name 函数
+ *   2. 按格式串压入参数
+ *   3. lua_pcall 调用，期望返回 1 个 table
+ *   4. 逐字段提取 code/target/department/description
+ *   5. 清理栈
+ */
+int lua_vm_route_dispatch(lua_vm_t *vm, const char *func_name,
+                          route_response_t *response,
+                          const char *fmt, ...)
+{
+    if (!vm || !vm->L || !func_name || !response) return -1;
+
+    memset(response, 0, sizeof(route_response_t));
+
+    lua_getglobal(vm->L, func_name);
+    if (!lua_isfunction(vm->L, -1)) {
+        LOG_ERROR("Lua function '%s' not found", func_name);
+        lua_pop(vm->L, 1);
+        response->code = ROUTE_RESULT_ERROR;
+        return -1;
+    }
+
+    int nargs = 0;
+    if (fmt) {
+        va_list args;
+        va_start(args, fmt);
+        while (*fmt) {
+            switch (*fmt++) {
+                case 's':
+                    lua_pushstring(vm->L, va_arg(args, const char *));
+                    break;
+                case 'd':
+                    lua_pushinteger(vm->L, va_arg(args, int));
+                    break;
+                default:
+                    break;
+            }
+            nargs++;
+        }
+        va_end(args);
+    }
+
+    if (lua_pcall(vm->L, nargs, 1, 0) != LUA_OK) {
+        LOG_ERROR("Lua '%s' error: %s", func_name,
+                  lua_tostring(vm->L, -1));
+        lua_pop(vm->L, 1);
+        response->code = ROUTE_RESULT_ERROR;
+        return -1;
+    }
+
+    if (!lua_istable(vm->L, -1)) {
+        LOG_ERROR("'%s' did not return a table", func_name);
+        lua_pop(vm->L, 1);
+        response->code = ROUTE_RESULT_ERROR;
+        return -1;
+    }
+
+    lua_getfield(vm->L, -1, "code");
+    response->code = (int)lua_tointeger(vm->L, -1);
+    lua_pop(vm->L, 1);
+
+    lua_getfield(vm->L, -1, "target");
+    const char *target = lua_tostring(vm->L, -1);
+    if (target) strncpy(response->target_extension, target, MAX_EXTENSION_LEN - 1);
+    lua_pop(vm->L, 1);
+
+    lua_getfield(vm->L, -1, "department");
+    const char *dept = lua_tostring(vm->L, -1);
+    if (dept) strncpy(response->department, dept, MAX_DEPT_NAME_LEN - 1);
+    lua_pop(vm->L, 1);
+
+    lua_getfield(vm->L, -1, "description");
+    const char *desc = lua_tostring(vm->L, -1);
+    if (desc) strncpy(response->description, desc, MAX_ROUTE_DESC_LEN - 1);
+    lua_pop(vm->L, 1);
+
+    lua_pop(vm->L, 1);
+
+    LOG_DEBUG("Route dispatch [%s]: code=%d target=%s dept=%s desc=%s",
+              func_name, response->code, response->target_extension,
               response->department, response->description);
 
     return response->code;

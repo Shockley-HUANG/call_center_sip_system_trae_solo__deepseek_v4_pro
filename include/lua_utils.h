@@ -1,4 +1,4 @@
-/*
+﻿/*
  * lua_utils.h — Lua 虚拟机封装层头文件
  * ============================================================
  * 将 Lua C API 的原始操作封装为项目专用的高层接口，实现：
@@ -122,6 +122,33 @@ int lua_vm_reload_script(lua_vm_t *vm);
  */
 int lua_vm_call_route(lua_vm_t *vm, const char *caller_id,
                       const char *digits, route_response_t *response);
+
+/*
+ * 通用路由调度：调用任意Lua函数并提取route_response_t
+ * ------------------------------------------------------------
+ * 支持迭代2新增的7个标准化路由接口：
+ *   get_ivr_route / check_agent_status / overflow_route /
+ *   time_judge_route / invalid_key_fallback /
+ *   timeout_fallback / dept_internal_call_route
+ *
+ * 使用格式字符串 's'/'d' 指定参数类型：
+ *   's' — const char* → lua_pushstring
+ *   'd' — int         → lua_pushinteger
+ *
+ * 调用示例：
+ *   lua_vm_route_dispatch(vm, "get_ivr_route", "ss", "4001234567", "1", &resp);
+ *   // Lua: get_ivr_route("4001234567", "1") → route_response_t
+ *
+ * @param vm         虚拟机上下文
+ * @param func_name  Lua 函数名
+ * @param fmt        参数格式串（'s'/'d'）
+ * @param response   输出参数，路由结果
+ * @param ...        与格式串对应的参数值
+ * @return response->code 的值
+ */
+int lua_vm_route_dispatch(lua_vm_t *vm, const char *func_name,
+                          route_response_t *response,
+                          const char *fmt, ...);
 
 /* ============================================================
  * 五、通用 Lua 交互工具
