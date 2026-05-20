@@ -66,6 +66,21 @@
 /* 系统最大并发通话数（千人企业峰值预留 2x 冗余） */
 #define MAX_CONCURRENT_CALLS 2048
 
+/* epoll 单次最大事件数 */
+#define MAX_EPOLL_EVENTS 1024
+
+/* epoll_wait 超时间隔（毫秒） */
+#define EPOLL_WAIT_TIMEOUT_MS 100
+
+/* TCP listen backlog */
+#define SERVER_TCP_BACKLOG 128
+
+/* 连接空闲超时（秒），超时自动释放 */
+#define CONNECTION_IDLE_TIMEOUT_SEC 300
+
+/* 空闲连接检测间隔（秒） */
+#define IDLE_CHECK_INTERVAL_SEC 10
+
 /* ============================================================
  * 三、超时时间常量
  * ------------------------------------------------------------

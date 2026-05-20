@@ -6,13 +6,13 @@
 
 ---
 
-## 问题 #1 — Git 文件修改追踪异常
+## 问题 #1  Git 文件修改追踪异常
 
 **日期**：2026-05-18
 
 **严重程度**：中
 
-**状态**：已解决 ✅
+**状态**：已解决
 
 ### 问题描述
 
@@ -23,7 +23,7 @@
 
 ### 根因分析
 
-在 Windows + PowerShell 终端环境下，对同一文件执行多次 `SearchReplace` 增量修改后，Git 的索引与工作区文件内容出现不同步。通过 `git hash-object` 对比验证，确认工作区文件哈希 ≠ 索引/HEAD 哈希，文件确实已修改但 Git 未追踪。
+在 Windows + PowerShell 终端环境下，对同一文件执行多次 `SearchReplace` 增量修改后，Git 的索引与工作区文件内容出现不同步。通过 `git hash-object` 对比验证，确认工作区文件哈希 不等于 索引/HEAD 哈希，文件确实已修改但 Git 未追踪。
 
 ### 最终解决方案
 
@@ -43,19 +43,19 @@ git push origin main                         # 推送
 
 ### 经验教训
 
-1. 对同一文件做 ≥ 3 处修改时，用 Write 一次性写入
+1. 对同一文件做 >= 3 处修改时，用 Write 一次性写入
 2. 文件修改后立即用 `git diff` 验证
 3. 终极方案：`git update-index --really-refresh <file>`
 
 ---
 
-## 问题 #2 — GitHub 页面中文乱码（UTF-8 BOM 缺失）
+## 问题 #2  GitHub 页面中文乱码（UTF-8 BOM 缺失）
 
 **日期**：2026-05-18
 
 **严重程度**：高
 
-**状态**：已解决 ✅
+**状态**：已解决
 
 ### 问题描述
 
@@ -85,99 +85,164 @@ $bytes = [System.IO.File]::ReadAllBytes("$PWD\<file>")
 
 ---
 
-## 问题 #3 — PowerShell → WSL 终端中文输出乱码
+## 问题 #3  PowerShell to WSL 终端中文输出乱码
 
 **日期**：2026-05-19
 
 **严重程度**：中
 
-**状态**：已解决 ✅
+**状态**：已解决
 
 ### 问题描述
 
-在 Windows PowerShell 终端通过 `wsl -e bash -c "..."` 或 `wsl bash` 运行编译后的 `build/sip_server` 时，程序中所有中文字符输出均显示为乱码。例如：
-
-```
-# 乱码输出
-[DEBUG] Route dispatch: desc=閿€鍞儴 鏈夌┖闂插潗甯
-[route.lua]  宸ヤ綔鏃ユ椂娈碉紝浣跨敤鏍囧噯璺
-
-# 正常应该是
-[DEBUG] Route dispatch: desc=销售部 有空闲坐席
-[route.lua]  工作日时段，使用标准路由策略
-```
-
-英文和数字输出完全正常，仅中文受影响。
+在 Windows PowerShell 终端通过 `wsl -e bash -c "..."` 或 `wsl bash` 运行编译后的 `build/sip_server` 时，程序中所有中文字符输出均显示为乱码。
 
 ### 根因分析
 
-**编码链路不匹配**：
-
-| 环节 | 编码 | 说明 |
-|------|------|------|
-| WSL 内程序 (sip_server) | UTF-8 | C/Lua 程序输出 |
-| WSL bash 终端 | UTF-8 | WSL 内部原生 UTF-8 |
-| PowerShell ← WSL 管道 | GBK (936) | PowerShell 默认使用系统 ANSI 编码 |
-| PowerShell 控制台 | GBK (936) | Windows 中文版默认代码页 |
-
-当输出链路为 **程序 → WSL bash → PowerShell 管道 → 终端** 时，UTF-8 字节流被 PowerShell 以 GBK 方式解码，多字节 UTF-8 中文字符（通常 3 字节）被错误拆解为 GBK 双字节序列，产生乱码。
-
-**直接验证**：在 WSL 内部直接运行程序（不经过 PowerShell 管道），中文完全正常：
-```bash
-# WSL 内部运行 — 无乱码
-LANG=zh_CN.UTF-8 ./build/sip_server
-```
-
-### 尝试过的无效操作
-
-| 操作 | 结果 |
-|------|------|
-| `chcp 65001` 切换 PowerShell 代码页 | 无效（管道编码不受 `chcp` 影响） |
-| `[Console]::OutputEncoding = UTF8` | 无效（Trae Sandbox 终端限制） |
-| 程序内部 setlocale() | 无效（问题在传输管道，不在程序） |
-| 直接 `wsl ./build/sip_server` | 依然乱码 |
+PowerShell to WSL 管道编码不匹配（GBK 936 vs UTF-8）。
 
 ### 最终解决方案
 
-在 WSL 内执行程序时，通过 **WSL 内部管道** 完成输出，避免经过 PowerShell 的编码转换层。直接在 Makefile 的 `run` 和新增 `demo` 目标中设置 `LANG=zh_CN.UTF-8` 前缀：
+在 WSL 内执行程序时设置 `LANG=zh_CN.UTF-8`。
 
-```makefile
-# Makefile 修改
-.PHONY: run
-run: all
-	@LANG=zh_CN.UTF-8 $(TARGET)          # 之前: @cd $(CURDIR) && $(TARGET)
+### 经验教训
 
-.PHONY: demo
-demo: all
-	@echo "a" | LANG=zh_CN.UTF-8 timeout 5 $(TARGET) 2>&1; exit 0   # 新增目标
+1. 所有通过 WSL 运行的程序，如果涉及中文输出，必须加 `LANG=zh_CN.UTF-8` 前缀
+2. Makefile 中的 `run` / `demo` 目标已永久固化此设置
+
+---
+
+## 问题 #4  Write 工具隐式写入 UTF-8 BOM 导致重复 BOM
+
+**日期**：2026-05-20
+
+**严重程度**：高
+
+**状态**：已解决
+
+### 问题描述
+
+V0.3 迭代中，使用 Write 工具写入新文件后，再用 PowerShell 补写 BOM，结果编译时报错：
+```
+error: expected '...' before 'typedef'
 ```
 
-**关键机制**：`LANG=zh_CN.UTF-8` 不仅设置程序输出的 locale，更重要的是**强制 WSL 子进程以 UTF-8 模式运行**，当 `timeout` 或管道输出回 PowerShell 时，WSL 会自动处理编码转换。
+xxd 查看发现文件头出现双重 BOM（`EF BB BF EF BB BF`），GCC 将第二个 BOM 当作源代码的一部分解析，导致语法错误。
 
-**手动运行的正确方式**：
-```bash
-# ✅ 正确（WSL 内）
-wsl -e bash -c "LANG=zh_CN.UTF-8 ./build/sip_server"
+### 根因分析
 
-# ✅ 正确（Makefile）
-make run    # 已内置 LANG=zh_CN.UTF-8
-make demo   # Demo 测试，5秒自动退出
+Write 工具实际行为是**隐式自动写入 UTF-8 BOM**（与之前理解的不一致）。当再用 PowerShell `Get-Content -Encoding UTF8` 读取（自动剥离 BOM）+ `WriteAllText(UTF8Encoding($true))` 写入时，产生了双重 BOM。
 
-# ❌ 错误（会出现乱码）
-wsl ./build/sip_server
+部分文件甚至出现了三重 BOM（main.c 累积了 3 个）。
+
+### 最终解决方案
+
+编写 BOM 修复脚本，先检测并剥离所有重复 BOM，再写入单个 BOM：
+
+```powershell
+$bytes = [System.IO.File]::ReadAllBytes($path)
+$start = 0
+while ($start+2 -lt $bytes.Length -and
+       $bytes[$start] -eq 239 -and
+       $bytes[$start+1] -eq 187 -and
+       $bytes[$start+2] -eq 191) {
+    $start += 3
+}
+$content = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
+[System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($true))
 ```
 
 ### 经验教训
 
-1. **所有通过 WSL 运行的程序，如果涉及中文输出，必须加 `LANG=zh_CN.UTF-8` 前缀**
-2. Makefile 中的 `run` / `demo` 目标已永久固化此设置
-3. 不要在 PowerShell 侧尝试解决（chcp/OutputEncoding 在 Sandbox 环境无效），从 WSL 侧统一
-4. 此规则写入 project_rules.md「终端中文编码规范」章节，后续所有新命令自动遵守
-5. 新增 `make demo` 目标，方便快速验证而无需手动 Ctrl+C 退出
+1. **Write 工具会隐式写入 BOM**，后续不需要再手动补写
+2. 如需手动控制 BOM，先用上述脚本剥离重复 BOM，再精确写入一个
+3. 编译失败时先用 `xxd <file> | head -3` 检查文件头十六进制
 
-### 已落地规则
+---
 
-见 [.trae/rules/project_rules.md](./.trae/rules/project_rules.md) — 「终端中文编码规范」章节。
+## 问题 #5  Lua 脚本文件不能包含 BOM
+
+**日期**：2026-05-20
+
+**严重程度**：中
+
+**状态**：已解决
+
+### 问题描述
+
+Demo 模式运行时报错：
+```
+Failed to load Lua script [lua/route.lua]: unexpected symbol near '<\239>'
+```
+
+239 = 0xEF，即 BOM 的第一字节。Lua 解析器将 BOM 视为非法字符。
+
+### 根因分析
+
+与问题 #4 相同，Write 工具隐式写入了 BOM。C 编译器（GCC）能正确处理 BOM，但 Lua 解释器不能。
+
+### 最终解决方案
+
+对 `.lua` 文件使用不带 BOM 的方式写入：
+
+```powershell
+[System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))
+```
+
+### 经验教训
+
+- C 源文件（.c/.h）：需要 BOM（GitHub 渲染兼容） -> `UTF8Encoding($true)`
+- Lua 脚本（.lua）：不能有 BOM（Lua 解析器不兼容） -> `UTF8Encoding($false)`
+
+---
+
+## 问题 #6  epoll 代码审查四项缺陷
+
+**日期**：2026-05-20
+
+**严重程度**：高
+
+**状态**：已解决
+
+### 问题描述
+
+对 V3.0 epoll 骨架代码进行系统性审查，发现以下四项缺陷：
+
+1. **ET 模式缺失**：未启用 `EPOLLET`，read 只执行一次而非 `while(1)` 循环读到 EAGAIN
+2. **EPOLLOUT 空壳**：`default_on_write()` 仅取消 EPOLLOUT 防止 CPU 100%，但没有发送缓冲区和动态注册逻辑
+3. **槽位 FD 复用隐患**：`connection_t` 无收发缓冲区字段，一旦后续添加，关闭旧连接时未清理会导致新连接读到脏数据
+4. **UDP 丢包截断风险**：UDP Socket 使用 `read()` 代替 `recvfrom()`，无法获取发送方地址；缓冲区仅 1024 字节，SIP 大消息会截断
+
+### 根因分析
+
+V3.0 骨架阶段优先完成了框架搭建和编译验证，默认回调函数仅作为占位实现，未按生产标准完善。
+
+### 最终解决方案
+
+**问题1  ET 模式循环读**：
+
+所有 Socket 注册均添加 `EPOLLET`，TCP 用 `while(1) read` 直到 EAGAIN，UDP 用 `while(1) recvfrom` 直到 EAGAIN。
+
+**问题2  EPOLLOUT 按需调度**：
+
+`connection_t` 新增 `send_buf` / `send_len` / `send_offset` 字段。`el_send_data()` 先尝试立即发送，写不完则暂存并注册 EPOLLOUT；`default_on_write()` 续发剩余数据，发完立即取消 EPOLLOUT。
+
+**问题3  槽位安全清理**：
+
+`free_connection()` 显式清零 `send_len`、`send_offset`，并 `memset(send_buf, 0, ...)`。
+
+**问题4  UDP recvfrom + 大缓冲区**：
+
+缓冲区扩至 65536 字节，UDP 分支使用 `recvfrom()` 替代 `read()`，获取发送方地址。
+
+同时新增 `es_send_all()` 底层发送引擎，支持 `send()`/`sendto()` 统一接口，处理 `EAGAIN`/`EINTR`/部分写入。
+
+### 经验教训
+
+1. ET 模式是高并发服务端的刚需，骨架阶段就应纳入
+2. EPOLLOUT 必须"注册-发送-取消"完整闭环，漏了"取消"会 CPU 100%
+3. 结构体字段 `memset` 清零 + 缓冲区显式清理双保险
+4. UDP 必须用 `recvfrom`（需地址）且缓冲区 >= 65536 字节
 
 ---
 
@@ -186,7 +251,7 @@ wsl ./build/sip_server
 > 后续新问题按以下格式追加：
 >
 > ```
-> ## 问题 #N — 简要描述
+> ## 问题 #N  简要描述
 > 
 > **日期**：YYYY-MM-DD
 > **严重程度**：高 / 中 / 低

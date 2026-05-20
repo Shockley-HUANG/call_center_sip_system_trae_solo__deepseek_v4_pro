@@ -1,7 +1,11 @@
 ﻿/*
- * main.c -- 呼叫中心 SIP 服务主入口
+ * main.c — 呼叫中心 SIP 服务主入口
  * ============================================================
- * V2.0: 全场景商用路由能力 Demo 测试
+ * V3.0: epoll 高并发服务端骨架 + 全场景商用路由
+ *
+ * 启动模式：
+ *   ./sip_server          启动 epoll 服务端（默认）
+ *   ./sip_server --demo   运行路由 Demo 测试
  */
 
 #include <stdio.h>
@@ -11,21 +15,25 @@
 #include "common_types.h"
 #include "logger.h"
 #include "lua_utils.h"
+#include "event_loop.h"
+#include "epoll_socket.h"
 
 #define LUA_SCRIPT_PATH  "lua/route.lua"
 #define PROJECT_NAME      "call_center_sip_server"
-#define PROJECT_VERSION   "2.0.0"
+#define PROJECT_VERSION   "3.0.0"
 
-/* ============================================================
- * 信号处理
- * ============================================================ */
 static volatile int keep_running = 1;
+static event_loop_t *g_event_loop = NULL;
 
 static void signal_handler(int sig)
 {
     (void)sig;
     keep_running = 0;
     LOG_INFO("Received shutdown signal, exiting gracefully...");
+
+    if (g_event_loop) {
+        el_stop(g_event_loop);
+    }
 }
 
 static void setup_signal_handlers(void)
@@ -35,29 +43,14 @@ static void setup_signal_handlers(void)
     signal(SIGPIPE, SIG_IGN);
 }
 
-/* ============================================================
- * 启动横幅
- * ============================================================ */
 static void print_banner(void)
 {
     printf("\n");
     printf("╔══════════════════════════════════════════════════════╗\n");
     printf("║   Call Center SIP Server  v%s                    ║\n", PROJECT_VERSION);
-    printf("║   企业400呼叫中心 - 全场景商用路由系统            ║\n");
+    printf("║   企业400呼叫中心 - epoll高并发 + 全场景路由        ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n");
     printf("\n");
-}
-
-/* ============================================================
- * 测试结果打印辅助函数
- * ============================================================ */
-static void print_result(const char *label, route_response_t *r)
-{
-    printf("       ─────────────────────────────────────\n");
-    printf("       %s\n", label);
-    printf("          code=%-2d  target=%-8s  dept=%-12s\n",
-           r->code, r->target_extension, r->department);
-    printf("          desc: %s\n", r->description);
 }
 
 static const char *code_name(int code)
@@ -118,9 +111,6 @@ static void demo_ivr_and_fallback(lua_vm_t *vm)
     printf("\n  ✓ Demo 1 完成\n");
 }
 
-/* ============================================================
- * Demo 2: 坐席状态检测 + 全忙溢出 + 排队 (接口2/3)
- * ============================================================ */
 static void demo_agent_status_and_overflow(lua_vm_t *vm)
 {
     printf("\n");
@@ -130,7 +120,6 @@ static void demo_agent_status_and_overflow(lua_vm_t *vm)
 
     route_response_t r;
 
-    /* 2.1: 检测各主要部门空闲状态 */
     printf("  [坐席状态检测]\n");
     const char *depts[] = {"sales", "service", "market", "support", "hr", "rnd"};
     for (int i = 0; i < 6; i++) {
@@ -139,7 +128,6 @@ static void demo_agent_status_and_overflow(lua_vm_t *vm)
         printf("    %-10s → %-18s %s\n", depts[i], code_name(r.code), r.description);
     }
 
-    /* 2.2: 客户端模拟全忙溢出测试（通过 queue 机制验证溢出链路） */
     printf("\n  [全忙溢出链路测试]\n");
 
     memset(&r, 0, sizeof(r));
@@ -155,9 +143,6 @@ static void demo_agent_status_and_overflow(lua_vm_t *vm)
     printf("\n  ✓ Demo 2 完成\n");
 }
 
-/* ============================================================
- * Demo 3: 时段判断 + 夜间兜底 (接口4)
- * ============================================================ */
 static void demo_time_judge(lua_vm_t *vm)
 {
     printf("\n");
@@ -171,7 +156,6 @@ static void demo_time_judge(lua_vm_t *vm)
     printf("    当前时段: %-18s\n", code_name(r.code));
     printf("    描述: %s\n", r.description);
 
-    /* 读取工作时段状态 */
     memset(&r, 0, sizeof(r));
     lua_vm_call_function(vm, "get_work_time_status", NULL);
     if (lua_istable(vm->L, -1)) {
@@ -191,9 +175,6 @@ static void demo_time_judge(lua_vm_t *vm)
     printf("\n  ✓ Demo 3 完成\n");
 }
 
-/* ============================================================
- * Demo 4: 内部分机互呼路由 (接口7)
- * ============================================================ */
 static void demo_internal_call(lua_vm_t *vm)
 {
     printf("\n");
@@ -228,9 +209,6 @@ static void demo_internal_call(lua_vm_t *vm)
     printf("\n  ✓ Demo 4 完成\n");
 }
 
-/* ============================================================
- * Demo 5: route_call 主入口综合测试
- * ============================================================ */
 static void demo_route_call(lua_vm_t *vm)
 {
     printf("\n");
@@ -269,9 +247,6 @@ static void demo_route_call(lua_vm_t *vm)
     printf("  ✓ Demo 5 完成\n");
 }
 
-/* ============================================================
- * Demo 6: 辅助接口测试
- * ============================================================ */
 static void demo_aux_functions(lua_vm_t *vm)
 {
     printf("\n");
@@ -279,7 +254,6 @@ static void demo_aux_functions(lua_vm_t *vm)
     printf("  Demo 6: 辅助接口测试\n");
     printf("═══════════════════════════════════════════════════════\n\n");
 
-    /* get_ivr_menu */
     printf("  [IVR 菜单]\n");
     lua_vm_call_function(vm, "get_ivr_menu", NULL);
     if (lua_istable(vm->L, -1)) {
@@ -298,7 +272,6 @@ static void demo_aux_functions(lua_vm_t *vm)
     }
     lua_pop(vm->L, 1);
 
-    /* get_department_info */
     printf("\n  [部门信息查询]\n");
     const char *query_depts[] = {"sales", "support", "hr", "rnd"};
     for (int i = 0; i < 4; i++) {
@@ -320,7 +293,6 @@ static void demo_aux_functions(lua_vm_t *vm)
         lua_pop(vm->L, 1);
     }
 
-    /* get_route_config */
     printf("\n  [路由配置]\n");
     lua_vm_call_function(vm, "get_route_config", NULL);
     if (lua_istable(vm->L, -1)) {
@@ -350,7 +322,6 @@ static void demo_aux_functions(lua_vm_t *vm)
     }
     lua_pop(vm->L, 1);
 
-    /* get_ivr_prompt */
     printf("\n  [IVR 欢迎语]\n");
     lua_vm_call_function(vm, "get_ivr_prompt", NULL);
     const char *prompt = lua_tostring(vm->L, -1);
@@ -360,15 +331,78 @@ static void demo_aux_functions(lua_vm_t *vm)
     printf("\n  ✓ Demo 6 完成\n");
 }
 
+static void run_demos(lua_vm_t *vm)
+{
+    demo_ivr_and_fallback(vm);
+    demo_agent_status_and_overflow(vm);
+    demo_time_judge(vm);
+    demo_internal_call(vm);
+    demo_route_call(vm);
+    demo_aux_functions(vm);
+
+    printf("\n");
+    printf("═══════════════════════════════════════════════════════\n");
+    printf("  全部 Demo 测试完成!\n");
+    printf("  覆盖 7 个核心接口:\n");
+    printf("    1. get_ivr_route          2. check_agent_status\n");
+    printf("    3. overflow_route         4. time_judge_route\n");
+    printf("    5. invalid_key_fallback   6. timeout_fallback\n");
+    printf("    7. dept_internal_call_route\n");
+    printf("═══════════════════════════════════════════════════════\n\n");
+}
+
+/* ============================================================
+ * 服务端模式：启动 epoll 服务
+ * ============================================================ */
+static int start_server_mode(lua_vm_t *vm)
+{
+    server_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    config.sip_port          = DEFAULT_SIP_PORT;
+    config.rtp_port_min      = DEFAULT_RTP_PORT_MIN;
+    config.rtp_port_max      = DEFAULT_RTP_PORT_MAX;
+    config.tcp_backlog       = SERVER_TCP_BACKLOG;
+    config.max_connections   = MAX_CONCURRENT_CALLS;
+    config.idle_timeout_sec  = CONNECTION_IDLE_TIMEOUT_SEC;
+    config.epoll_timeout_ms  = EPOLL_WAIT_TIMEOUT_MS;
+    config.epoll_max_events  = MAX_EPOLL_EVENTS;
+
+    g_event_loop = el_create(&config);
+    if (!g_event_loop) {
+        LOG_FATAL("Failed to create event loop");
+        return -1;
+    }
+
+    g_event_loop->user_data = vm;
+
+    LOG_INFO("========================================");
+    LOG_INFO("  SIP Server started on port %u", DEFAULT_SIP_PORT);
+    LOG_INFO("  Max connections: %d", MAX_CONCURRENT_CALLS);
+    LOG_INFO("  Idle timeout: %ds", CONNECTION_IDLE_TIMEOUT_SEC);
+    LOG_INFO("  Press Ctrl+C to shutdown...");
+    LOG_INFO("========================================");
+
+    int ret = el_run(g_event_loop);
+
+    return ret;
+}
+
 /* ============================================================
  * 主函数
  * ============================================================ */
 int main(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    int demo_mode = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--demo") == 0) {
+            demo_mode = 1;
+        }
+    }
 
     print_banner();
+    setup_signal_handlers();
 
     if (logger_init("./log", "sip_server.log", LOG_LEVEL_DEBUG) != 0) {
         fprintf(stderr, "Logger initialization failed\n");
@@ -377,9 +411,8 @@ int main(int argc, char *argv[])
 
     LOG_INFO("========================================");
     LOG_INFO("  %s v%s starting...", PROJECT_NAME, PROJECT_VERSION);
+    LOG_INFO("  Mode: %s", demo_mode ? "Demo Test" : "Server");
     LOG_INFO("========================================");
-
-    setup_signal_handlers();
 
     lua_vm_t *vm = lua_vm_create();
     if (!vm) {
@@ -401,37 +434,31 @@ int main(int argc, char *argv[])
 
     LOG_INFO("Lua route script V2.0 loaded successfully");
 
-    /* 运行 6 个 Demo 测试，覆盖 7 个核心接口全部场景 */
-    demo_ivr_and_fallback(vm);
-    demo_agent_status_and_overflow(vm);
-    demo_time_judge(vm);
-    demo_internal_call(vm);
-    demo_route_call(vm);
-    demo_aux_functions(vm);
+    if (demo_mode) {
+        run_demos(vm);
+        LOG_INFO("All demos completed, server ready for SIP connections");
+        LOG_INFO("Press Ctrl+C to shutdown...");
 
-    /* 总结 */
-    printf("\n");
-    printf("═══════════════════════════════════════════════════════\n");
-    printf("  全部 Demo 测试完成!\n");
-    printf("  覆盖 7 个核心接口:\n");
-    printf("    1. get_ivr_route          2. check_agent_status\n");
-    printf("    3. overflow_route         4. time_judge_route\n");
-    printf("    5. invalid_key_fallback   6. timeout_fallback\n");
-    printf("    7. dept_internal_call_route\n");
-    printf("═══════════════════════════════════════════════════════\n\n");
-
-    LOG_INFO("All demos completed, server ready for SIP connections");
-    LOG_INFO("Press Ctrl+C to shutdown...");
-
-    while (keep_running) {
+        while (keep_running) {
 #ifdef _WIN32
-        Sleep(1000);
+            Sleep(1000);
 #else
-        sleep(1);
+            sleep(1);
 #endif
+        }
+    } else {
+        if (start_server_mode(vm) != 0) {
+            LOG_ERROR("Server mode exited with error");
+        }
     }
 
     LOG_INFO("Shutting down...");
+
+    if (g_event_loop) {
+        el_destroy(g_event_loop);
+        g_event_loop = NULL;
+    }
+
     lua_vm_destroy(vm);
     logger_close();
 
