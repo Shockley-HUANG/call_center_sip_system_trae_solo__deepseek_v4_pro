@@ -1,7 +1,7 @@
-﻿/*
+/*
  * event_loop.c — epoll 事件循环与连接管理框架实现
  * ============================================================
- * V3.1: ET 模式循环读 + EPOLLOUT 按需注册 + UDP recvfrom 大缓冲区
+ * V4.0: ET 模式循环读 + EPOLLOUT 按需注册 + UDP SIP 集成 + el_default_on_read 公开接口
  */
 
 #include "event_loop.h"
@@ -24,7 +24,6 @@ static void cleanup_idle_connections(event_loop_t *el);
 static void default_on_accept(event_loop_t *el, int listen_fd,
                               int client_fd,
                               const struct sockaddr_in *client_addr);
-static void default_on_read(event_loop_t *el, connection_t *conn);
 static void default_on_write(event_loop_t *el, connection_t *conn);
 static void default_on_error(event_loop_t *el, connection_t *conn,
                              int error_code);
@@ -96,7 +95,7 @@ event_loop_t *el_create(const server_config_t *config)
 
     el_callbacks_t defaults = {
         default_on_accept,
-        default_on_read,
+        el_default_on_read,
         default_on_write,
         default_on_error,
         default_on_close,
@@ -568,7 +567,7 @@ static void default_on_accept(event_loop_t *el, int listen_fd,
              client_fd, conn->remote_addr, listen_fd);
 }
 
-static void default_on_read(event_loop_t *el, connection_t *conn)
+void el_default_on_read(event_loop_t *el, connection_t *conn)
 {
     int is_udp = (conn->type == CONN_TYPE_UDP_SIP ||
                   conn->type == CONN_TYPE_UDP_RTP);

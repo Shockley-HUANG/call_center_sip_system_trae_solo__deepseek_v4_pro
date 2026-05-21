@@ -1,4 +1,4 @@
-﻿/*
+/*
  * event_loop.h — epoll 事件循环与连接管理框架
  * ============================================================
  * 基于 epoll 的高并发事件驱动服务端框架。封装了：
@@ -8,7 +8,7 @@
  *   - 主事件循环（epoll_wait + 空闲检测）
  *   - 发送缓冲区管理（EPOLLOUT 按需注册/取消）
  *
- * 为 SIP 信令、RTP 媒体流等业务模块提供统一的 IO 事件接口。
+ * V4.0: el_default_on_read 公开接口供 SIP 模块复用
  *
  * 依赖：epoll_socket.h, common_types.h, logger.h
  */
@@ -182,6 +182,8 @@ void el_touch_connection(connection_t *conn);
 void el_set_callbacks(event_loop_t *el, const el_callbacks_t *cb);
 
 int el_get_sip_fd(const event_loop_t *el);
+
+void el_default_on_read(event_loop_t *el, connection_t *conn);
 
 /* ============================================================
  * 发送 API（EPOLLOUT 按需注册）

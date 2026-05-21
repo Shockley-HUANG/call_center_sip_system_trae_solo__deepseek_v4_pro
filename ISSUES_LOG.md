@@ -1,4 +1,4 @@
-﻿# 项目问题记录 (Issue Log)
+# 项目问题记录 (Issue Log)
 
 ## 记录说明
 
@@ -243,6 +243,53 @@ V3.0 骨架阶段优先完成了框架搭建和编译验证，默认回调函数
 2. EPOLLOUT 必须"注册-发送-取消"完整闭环，漏了"取消"会 CPU 100%
 3. 结构体字段 `memset` 清零 + 缓冲区显式清理双保险
 4. UDP 必须用 `recvfrom`（需地址）且缓冲区 >= 65536 字节
+
+---
+
+## 问题 #7  IDE 自动追加 UTF-8 BOM 导致 GCC 编译报错
+
+**日期**：2026-05-21
+
+**严重程度**：高
+
+**状态**：已解决
+
+### 问题描述
+
+在迭代4开发过程中，IDE（Trae Solo）每次对 `.c` / `.h` 文件执行 `Write` 或 `SearchReplace` 操作后，会自动在文件开头追加 UTF-8 BOM（`EF BB BF`）。GCC 编译器不支持 C 源文件开头的 BOM 字节，导致编译报错：
+
+```
+error: expected ';' before 'typedef'
+    1 | ﻿/*
+      | ^
+      | ;
+```
+
+反复尝试手动剥离 BOM 后，IDE 再次编辑文件时又会自动追加，形成死循环。
+
+### 根因分析
+
+项目规范要求 `.md` 文件中使用 UTF-8 BOM 以兼容 GitHub 中文渲染，但 `Write` 工具的 `UTF8Encoding($true)` 模式对所有文件都追加 BOM。C/C++ 编译器（GCC/Clang）不认识 BOM 标记，将其视为非法源代码字符。
+
+### 最终解决方案
+
+**方案一（Makefile 层自动剥离）**：在 Makefile 的 `all` 目标前置 `strip-bom` 步骤，使用 Python3 脚本在每次编译前自动扫描 `src/*.c` 和 `include/*.h`，检测并剥离 BOM 字节。确保编译过程零人工干预。
+
+```python
+for f in glob.glob("src/*.c") + glob.glob("include/*.h"):
+    d = open(f, "rb").read()
+    if d[:3] == b"\xef\xbb\xbf":
+        open(f, "wb").write(d[3:])
+```
+
+**方案二（编译流程链）**：`all: check-lua dirs strip-bom $(TARGET)`，确保 BOM 剥离在 GCC 编译之前执行。
+
+### 经验教训
+
+1. `.c` / `.h` 源文件不能有 BOM，GCC 不支持；`.md` 文档需要 BOM 以兼容 GitHub 渲染
+2. Makefile 本身也不能有 BOM（GNU Make 不认识）
+3. Lua 脚本（`.lua`）不能有 BOM（Lua 解释器不兼容）
+4. 编译流程前置自动化清理是比手动反复修复更可靠的方案
 
 ---
 

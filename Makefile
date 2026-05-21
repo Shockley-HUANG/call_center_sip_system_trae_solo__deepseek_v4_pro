@@ -1,8 +1,8 @@
-﻿# ============================================================
+# ============================================================
 #  Call Center SIP Server - Makefile
 #  千人企业呼叫中心模拟系统
 #  技术栈: C + Lua + epoll + Socket
-#  Version: V3.0 — epoll高并发服务端骨架
+#  Version: V4.0 — UDP SIP协议栈 + epoll高并发
 # ============================================================
 
 # --- 编译器与标志 ---
@@ -62,7 +62,7 @@ RESET   = \033[0m
 #  默认目标: 编译
 # ============================================================
 .PHONY: all
-all: check-lua dirs $(TARGET)
+all: check-lua dirs strip-bom $(TARGET)
 	@echo "$(GREEN)[✓] 编译成功: $(TARGET)$(RESET)"
 
 # ============================================================
@@ -71,6 +71,25 @@ all: check-lua dirs $(TARGET)
 .PHONY: dirs
 dirs:
 	@mkdir -p $(BUILD_DIR) $(LOG_DIR)
+
+# ============================================================
+#  剥离 C/H 源文件 BOM（GCC 不支持 BOM）
+# ============================================================
+define STRIP_BOM_SCRIPT
+import sys, os, glob
+for f in glob.glob("src/*.c") + glob.glob("include/*.h"):
+    try:
+        d = open(f, "rb").read()
+        if d[:3] == b"\xef\xbb\xbf":
+            open(f, "wb").write(d[3:])
+    except Exception as e:
+        print("BOM strip error: %s: %s" % (f, e), file=sys.stderr)
+endef
+export STRIP_BOM_SCRIPT
+
+.PHONY: strip-bom
+strip-bom:
+	@python3 -c "$$STRIP_BOM_SCRIPT"
 
 # ============================================================
 #  编译目标程序

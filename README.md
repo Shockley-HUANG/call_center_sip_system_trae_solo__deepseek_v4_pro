@@ -1,4 +1,4 @@
-﻿# 千人企业呼叫中心模拟系统
+# 千人企业呼叫中心模拟系统
 
 基于   C/C++ + Lua + SIP + RTP + epoll   技术栈的企业级呼叫中心模拟系统，支持 1000 人规模企业内部通信、外部 400 总机 IVR 导航、24 小时人工客服。
 
@@ -6,7 +6,7 @@
 
 当前版本
 
-：V3.1 — epoll ET 边缘触发 + EPOLLOUT 按需调度 + UDP 大缓冲区
+：V4.0 — UDP SIP 协议栈 + epoll 高并发 + 全场景路由
 
 ## 开发工具
 
@@ -26,13 +26,15 @@ call_center_sip_system/
 │   ├── logger.c            # 日志工具实现
 │   ├── lua_utils.c         # Lua 虚拟机封装（含 lua_vm_route_dispatch）
 │   ├── epoll_socket.c      # epoll + Socket 底层封装（创建/注册/销毁）
-│   └── event_loop.c        # 事件循环与连接管理框架
+│   ├── event_loop.c        # 事件循环与连接管理框架
+│   └── sip_handler.c        # SIP 协议栈（解析/验证/分发/响应）
 ├── include/                # C 头文件
 │   ├── common_types.h      # 通用类型定义（11个路由结果码 + epoll常量）
 │   ├── logger.h            # 日志宏接口
 │   ├── lua_utils.h         # Lua 工具函数声明
 │   ├── epoll_socket.h      # epoll/Socket 底层操作接口
-│   └── event_loop.h        # 事件循环回调 + 连接管理接口
+│   ├── event_loop.h        # 事件循环回调 + 连接管理接口
+│   └── sip_handler.h        # SIP 报文处理接口（方法枚举/解析/分发）
 ├── lua/                    # Lua 业务脚本
 │   └── route.lua           # 全场景商用路由脚本 V2.0（7大标准接口）
 ├── conf/                   # 配置文件
@@ -427,6 +429,7 @@ wsl ./build/sip_server
 
 | 时间               | 版本     | 内容                                                                                 |
 | ---------------- | ------ | ---------------------------------------------------------------------------------- |
+| 2026-05-21 20:45 | v4.0.0 | 迭代4完成：UDP SIP协议栈（sip_handler.c/h），13种SIP方法识别，INVITE→Lua路由→SIP响应完整链路，BOM自动剥离+编译零错误零警告，Demo6组回归通过 |
 | 2026-05-20 19:30 | v3.0.0 | 迭代3完成：epoll高并发服务端骨架（epoll_socket+event_loop+连接管理+空闲检测），编译零错误零警告，Demo+服务端模式验证通过 |
 | 2026-05-19 11:00 | v2.0.0 | 补录：ISSUES\_LOG 问题#3 终端中文乱码、README V2.0、project\_rules 终端编码规范、tasks.md 创建、全量 Git 推送 |
 | 2026-05-19 10:30 | v2.0.0 | 迭代2完成：全场景商用路由（7大接口+坐席状态+排队+时段+容错+热配置），WSL编译验证通过                                    |

@@ -1,7 +1,7 @@
-﻿/*
+/*
  * main.c — 呼叫中心 SIP 服务主入口
  * ============================================================
- * V3.0: epoll 高并发服务端骨架 + 全场景商用路由
+ * V4.0: UDP SIP 协议栈 + 全场景路由 + epoll 高并发
  *
  * 启动模式：
  *   ./sip_server          启动 epoll 服务端（默认）
@@ -17,10 +17,11 @@
 #include "lua_utils.h"
 #include "event_loop.h"
 #include "epoll_socket.h"
+#include "sip_handler.h"
 
 #define LUA_SCRIPT_PATH  "lua/route.lua"
 #define PROJECT_NAME      "call_center_sip_server"
-#define PROJECT_VERSION   "3.0.0"
+#define PROJECT_VERSION   "4.0.0"
 
 static volatile int keep_running = 1;
 static event_loop_t *g_event_loop = NULL;
@@ -375,6 +376,13 @@ static int start_server_mode(lua_vm_t *vm)
     }
 
     g_event_loop->user_data = vm;
+
+    {
+        el_callbacks_t sip_cb;
+        memset(&sip_cb, 0, sizeof(sip_cb));
+        sip_cb.on_read  = sip_handler_on_read;
+        el_set_callbacks(g_event_loop, &sip_cb);
+    }
 
     LOG_INFO("========================================");
     LOG_INFO("  SIP Server started on port %u", DEFAULT_SIP_PORT);

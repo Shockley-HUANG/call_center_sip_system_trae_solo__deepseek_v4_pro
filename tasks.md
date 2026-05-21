@@ -38,13 +38,17 @@
 | V0.3.1 | 新增 el_send_data() + es_send_all() 公共 API | 2026-05-20 |
 | V0.3.1 | WSL 编译验证 + Demo + Server 模式回归通过 | 2026-05-20 |
 | V0.3.1 | ISSUES_LOG 问题#6 代码审查四项修复记录 | 2026-05-20 |
+| V4.0 | SIP协议栈（sip_handler.h/c）：13种SIP方法识别/解析/验证/分发/响应生成 | 2026-05-21 |
+| V4.0 | SIP INVITE → Lua route_call → 路由结果 → SIP状态码映射完整链路 | 2026-05-21 |
+| V4.0 | event_loop 公开 el_default_on_read 接口供SIP模块复用 | 2026-05-21 |
+| V4.0 | Makefile 新增 strip-bom 编译前自动剥离BOM（解决IDE追加BOM致GCC报错） | 2026-05-21 |
+| V4.0 | WSL 编译验证（零错误零警告）+ Demo 6组回归通过 | 2026-05-21 |
 
 ## 未开始
 
 | 迭代 | 任务 |
 |------|------|
-| V0.3 | SIP协议栈（信令收发+状态机） |
-| V0.3 | RTP媒体流传输 |
+| V0.4 | RTP媒体流传输 |
 | V0.4 | 会话状态管理（call_session_t生命周期） |
 | V0.4 | MySQL员工/分机数据对接 |
 | V0.4 | Redis坐席状态/排队队列对接 |
