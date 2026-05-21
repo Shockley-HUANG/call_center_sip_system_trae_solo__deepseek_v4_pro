@@ -108,6 +108,50 @@ git push origin main
 - `git update-index --really-refresh`：**强制重新读取文件内容并计算哈希**，无视 stat 缓存
 - `--really-refresh` 比修改文件 mtime（`LastWriteTime`）、`git add -f` 等方案都更可靠
 
+## Git 操作固化流程（问题 #8 之后永久生效）
+
+### 核心原则：跳过已知故障诊断，直接执行修复
+
+Git 在 Windows+WSL 混合环境下存在三类已知故障（详见 [ISSUES_LOG.md 问题 #8](../../ISSUES_LOG.md)），**后续每次 Git 操作不重复诊断根因，直接按下述流程执行**。
+
+### 固化提交流程（每次 commit 必须按此顺序执行）
+
+```
+1. BOM 清理（Makefile 已自动化，也可手动执行）
+   python3 tools/strip_bom.py
+
+2. 强制预设 Git 身份（不依赖 WSL 持久化）
+   git config user.name "Shockley-HUANG"
+   git config user.email "shockley.huang@hotmail.com"
+
+3. 精确 add（禁用 git add -A，避免 tools/ 等误提交）
+   列出本次变更的所有文件路径，逐个 git add <file>
+   新增文件用 git add，不存在的路径跳过
+
+4. 强制刷新 .md 文件索引（修复 Git 索引不同步）
+   git update-index --really-refresh README.md ISSUES_LOG.md tasks.md
+   git add -f README.md ISSUES_LOG.md tasks.md
+
+5. 最终确认
+   git status --short
+   确认无遗漏、无意外文件
+
+6. Commit
+   git commit -m "feat/fix/docs/refactor: ..."
+
+7. Push（独立步骤，失败即停止）
+   git push origin main
+   若提示 Username/Password → 立即告知用户手工 push，不做重试
+```
+
+### 禁止行为
+
+- ❌ 禁止 `git add -A`（会误提交 tools/ 等辅助目录）
+- ❌ 禁止 push 失败后反复重试（HTTPS 认证无解，直接告知用户）
+- ❌ 禁止 commit 前不执行 `git config user.name/email`
+- ❌ 禁止对 Git 状态异常做根因分析（已知三类故障，直接修复）
+- ❌ 禁止重复检查 git remote / git log 等配置信息（不变信息，只确认一次）
+
 ## 终端中文编码规范（重要）
 
 ### 规则：WSL 运行项目时必须设置 `LANG=zh_CN.UTF-8` 环境变量

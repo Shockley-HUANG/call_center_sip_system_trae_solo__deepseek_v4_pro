@@ -1,4 +1,4 @@
-# 项目问题记录 (Issue Log)
+﻿# 项目问题记录 (Issue Log)
 
 ## 记录说明
 
@@ -290,6 +290,47 @@ for f in glob.glob("src/*.c") + glob.glob("include/*.h"):
 2. Makefile 本身也不能有 BOM（GNU Make 不认识）
 3. Lua 脚本（`.lua`）不能有 BOM（Lua 解释器不兼容）
 4. 编译流程前置自动化清理是比手动反复修复更可靠的方案
+
+---
+
+## 问题 #8  Git 提交流程三连故障（索引不同步 / 身份丢失 / Push 认证）
+
+**日期**：2026-05-21
+
+**严重程度**：中
+
+**状态**：已解决（已固化到项目规则中，后续直接按固化流程执行）
+
+### 问题描述
+
+迭代4 提交阶段，Git 操作连续遭遇三类故障，导致 commit 耗时远超预期：
+
+1. **Git 索引不同步（问题 #1 复发）**：`README.md`、`ISSUES_LOG.md` 被多次 `SearchReplace` 修改后，`git status` 不显示这两个文件，需要 `git update-index --really-refresh` + `git add -f` 强制处理
+2. **Git 用户身份丢失**：`git commit` 时报 `Author identity unknown`，`git config user.name` 返回空。根因是 WSL 重启后仓库级 `.git/config` 无用户信息，需重新 `git config user.name/email`
+3. **Push 交互式认证**：`git push origin main` 停在 `Username for 'https://github.com':`，HTTPS 远程仓库无法在非交互终端自动认证，必须用户手动输入
+
+### 根因分析
+
+| 故障 | 根因 |
+|------|------|
+| 索引不同步 | 同一文件多次增量编辑后，Git stat 缓存与实际内容脱节（已知问题 #1） |
+| 身份丢失 | WSL 终端重启后，`git config --local` 的 user.name/email 可能被清空，且全局 `~/.gitconfig` 也不可靠 |
+| Push 认证 | HTTPS 远程仓库的 credential 缓存过期，非交互终端无法弹出输入提示 |
+
+### 最终解决方案
+
+**对整个提交流程进行了标准化固化**（已写入 `project_rules.md` + `ai_dev_constraints.md`）：
+
+1. **Git 预设身份**：每次 commit 前强制 `git config user.name/email`，不依赖 WSL 持久化
+2. **强制刷新索引**：所有被修改的 `.md` 文件，commit 前统一 `git update-index --really-refresh` → `git add -f`
+3. **Push 独立执行**：commit 与 push 分离，push 失败时直接提示用户手工执行，不重试、不卡死
+4. **`git add -A` 禁用**：改用精确文件列表 add，避免 `tools/` 等临时目录误提交
+
+### 经验教训
+
+1. Git 在 Windows+WSL 混合环境下不可靠 —— 不要相信 `git status` 的即时准确性，多用 `--really-refresh`
+2. 用户身份配置不能依赖 WSL 持久化 —— 每次 commit 前强制设定
+3. HTTPS Push 是唯一无解的问题 —— 遇到立即告知用户手工处理，不做徒劳重试
 
 ---
 
