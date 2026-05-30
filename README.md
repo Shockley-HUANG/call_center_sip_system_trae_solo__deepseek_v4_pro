@@ -22,23 +22,38 @@
 ```
 call_center_sip_system/
 ├── src/                    # C 源代码
-│   ├── main.c              # 主程序入口（--demo 路由测试 / 默认 epoll 服务端）
+│   ├── main.c              # 主程序入口（--demo / --call-test / Server 三模式）
 │   ├── logger.c            # 日志工具实现
 │   ├── lua_utils.c         # Lua 虚拟机封装（含 lua_vm_route_dispatch）
 │   ├── epoll_socket.c      # epoll + Socket 底层封装（创建/注册/销毁）
 │   ├── event_loop.c        # 事件循环与连接管理框架
-│   └── sip_handler.c        # SIP 协议栈（解析/验证/分发/响应）
+│   ├── sip_handler.c       # SIP 协议栈（解析/验证/分发/响应）
+│   ├── db_mysql.c           # MySQL 连接池 + 业务 CRUD（V2.0）
+│   ├── db_redis.c           # Redis 缓存操作（KV/Hash/ZSet）
+│   ├── db_sync.c            # 数据同步层（异步Worker+Cache Aside+运行时恢复）
+│   └── call_test.c          # 50次呼叫模拟测试模块
 ├── include/                # C 头文件
 │   ├── common_types.h      # 通用类型定义（11个路由结果码 + epoll常量）
 │   ├── logger.h            # 日志宏接口
 │   ├── lua_utils.h         # Lua 工具函数声明
 │   ├── epoll_socket.h      # epoll/Socket 底层操作接口
 │   ├── event_loop.h        # 事件循环回调 + 连接管理接口
-│   └── sip_handler.h        # SIP 报文处理接口（方法枚举/解析/分发）
+│   ├── sip_handler.h       # SIP 报文处理接口（方法枚举/解析/分发）
+│   ├── db_config.h          # 数据库配置+连接池槽位+异步任务队列类型
+│   ├── db_mysql.h           # MySQL 连接池接口
+│   ├── db_redis.h           # Redis 缓存接口
+│   ├── db_sync.h            # 数据同步层接口
+│   └── call_test.h          # 呼叫测试接口
 ├── lua/                    # Lua 业务脚本
-│   └── route.lua           # 全场景商用路由脚本 V2.0（7大标准接口）
+│   └── route.lua           # 全场景商用路由脚本 V2.0（7大标准接口+_TEST_FORCE_WORKTIME）
 ├── conf/                   # 配置文件
-│   └── sip_server.conf     # 服务主配置
+│   └── sip_server.conf     # 服务主配置（含MySQL/Redis预留段）
+├── sql/                    # 数据库脚本
+│   └── schema.sql          # MySQL建表DDL（6张表+9部门种子数据）
+├── tools/                  # 辅助脚本
+│   ├── check_db.sh          # 数据库内容检查
+│   ├── setup_mysql.sh       # MySQL环境初始化
+│   └── full_test.sh         # 全流程测试脚本
 ├── build/                  # 编译产物（自动生成）
 ├── log/                    # 运行日志（自动生成）
 ├── docs/                   # 项目设计文档（永久保留）
@@ -62,6 +77,8 @@ call_center_sip_system/
 | GNU Make   | >= 4.0               | 构建工具             |
 | Lua        | 5.2 / 5.3 / 5.4      | 开发库 (liblua-dev) |
 | pkg-config | 任意                   | 自动检测依赖           |
+| MySQL      | >= 8.0                | 持久化存储（libmysqlclient-dev） |
+| Redis      | >= 7.0                | 高速缓存（libhiredis-dev） |
 | Linux      | Ubuntu 20.04+ / WSL2 | 运行环境（需要 epoll 支持）|
 
 ### 2. 安装依赖
@@ -77,6 +94,7 @@ make install-deps-ubuntu
 # 或手动:
 sudo apt-get update
 sudo apt-get install -y liblua5.4-dev lua5.4 build-essential pkg-config
+sudo apt-get install -y libmysqlclient-dev libhiredis-dev mysql-server
 ```
 
 
@@ -107,15 +125,19 @@ make
 # 运行 Demo 测试（编译 + 6组全场景测试，5秒自动退出）
 make demo
 
+# 运行 50 次呼叫模拟测试（编译 + 全场景覆盖，自动写入MySQL）
+make call-test
+
 # 启动 epoll 服务端（编译 + SIP 5060 端口监听）
 make run
 ```
 
-两种启动模式：
+三种启动模式：
 
 ```bash
-./build/sip_server           # 默认：启动 epoll 服务端，监听 SIP 5060
-./build/sip_server --demo    # Demo：运行 6 组路由测试
+./build/sip_server              # 默认：启动 epoll 服务端，监听 SIP 5060
+./build/sip_server --demo       # Demo：运行 6 组路由测试
+./build/sip_server --call-test  # Call Test：50次呼叫模拟 + 写入MySQL
 ```
 
 
@@ -133,10 +155,12 @@ LANG=zh_CN.UTF-8 ./build/sip_server
 ```bash
 make clean           # 清理编译产物
 make distclean       # 清理编译产物 + 日志
+make init-db          # 初始化 MySQL 数据库（需要 sudo mysql）
+make check-mysql      # 检查 MySQL 开发环境
+make check-redis      # 检查 Redis 开发环境
 make debug           # 调试模式编译（-O0 -ggdb3）
 make gdb             # 编译并启动 GDB 调试
 make valgrind        # 编译并检测内存泄漏
-make check-lua       # 检查 Lua 开发环境
 make help            # 显示所有命令
 ```
 
@@ -254,6 +278,49 @@ C 程序 (main.c)
 ### 配置热更新
 
 所有路由参数（超时时间、错误阈值、工作时段、溢出优先级）通过 `update_route_config()` 运行时热更新，无需重启 C 服务。
+
+## 数据库初始化流程
+
+### 自动建表机制
+
+服务启动时自动执行 `sql/schema.sql`，包含 6 张表：
+
+| # | 表名 | 用途 | 幂等性 |
+|---|------|------|:---:|
+| 1 | `departments` | 部门配置（9条种子） | `CREATE IF NOT EXISTS` |
+| 2 | `extensions` | 员工分机 | `CREATE IF NOT EXISTS` |
+| 3 | `agents` | 坐席状态 | `CREATE IF NOT EXISTS` |
+| 4 | `call_records` | 通话记录 | `CREATE IF NOT EXISTS` |
+| 5 | `call_logs` | 呼叫日志 | `CREATE IF NOT EXISTS` |
+| 6 | `voicemails` | 用户留言 | `CREATE IF NOT EXISTS` |
+
+### 启动流程
+
+```
+main.c: init_database()
+  └─ db_sync_init()
+       ├─ db_mysql_pool_connect_all()    # 8槽位连接池
+       ├─ db_mysql_init_schema()          # 逐条执行 schema.sql
+       └─ db_sync_seed_demo_data()        # 检查 agents>100 → 跳过; 否则生成1210员工+830坐席
+```
+
+### 重复运行行为
+
+| 场景 | 结果 |
+|------|------|
+| 首次运行 | 自动建表 → 写入9部门 → 生成1210员工+830坐席 |
+| 再次运行（已有DB） | `CREATE TABLE IF NOT EXISTS` 跳过建表；种子数据检测到 agents>100 自动跳过 |
+| `make call-test` 重复执行 | 在既有 call_records 上**追加**50条新记录（不覆盖旧数据） |
+
+### 数据存储位置
+
+| 存储 | 位置 | Git |
+|------|------|:--:|
+| 表结构 + 部门种子 | `sql/schema.sql` | ✅ |
+| 种子数据生成代码 | `src/db_sync.c` `db_sync_seed_demo_data()` | ✅ |
+| MySQL 运行时数据 | `/var/lib/mysql/call_center/` (.ibd) | ❌ |
+
+> 换机部署：只需 `make && make call-test`（前提 MySQL 已运行且有 `sip_user` 账户），程序自动建表+生成数据。
 
 ## 后续扩展
 
@@ -429,6 +496,7 @@ wsl ./build/sip_server
 
 | 时间               | 版本     | 内容                                                                                 |
 | ---------------- | ------ | ---------------------------------------------------------------------------------- |
+| 2026-05-30 14:30 | v4.2.0 | 迭代5完成：MySQL连接池(db_mysql)+Redis缓存(db_redis)+异步Worker线程(db_sync)+Cache Aside+重连风暴保护；schema.sql 6张表设计；1210名员工+830坐席种子数据；50次呼叫模拟测试(call_test)；_TEST_FORCE_WORKTIME测试模式；WSL编译零错误零警告+MySQL数据写入验证 |
 | 2026-05-21 20:45 | v4.0.0 | 迭代4完成：UDP SIP协议栈（sip_handler.c/h），13种SIP方法识别，INVITE→Lua路由→SIP响应完整链路，BOM自动剥离+编译零错误零警告，Demo6组回归通过 |
 | 2026-05-20 19:30 | v3.0.0 | 迭代3完成：epoll高并发服务端骨架（epoll_socket+event_loop+连接管理+空闲检测），编译零错误零警告，Demo+服务端模式验证通过 |
 | 2026-05-19 11:00 | v2.0.0 | 补录：ISSUES\_LOG 问题#3 终端中文乱码、README V2.0、project\_rules 终端编码规范、tasks.md 创建、全量 Git 推送 |
