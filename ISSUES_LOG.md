@@ -333,6 +333,46 @@ for f in glob.glob("src/*.c") + glob.glob("include/*.h"):
 3. HTTPS Push 是唯一无解的问题 —— 遇到立即告知用户手工处理，不做徒劳重试
 
 ---
+## 问题 #9  V4.2 编译错误三连（ETIMEDOUT/旧常量/前向声明）
+
+**日期**：2026-05-30
+
+**严重程度**：低
+
+**状态**：已解决
+
+### 问题描述
+
+迭代5 V4.2 代码首次编译时遇到三个错误，均为头文件依赖不完整所致：
+
+1. **`ETIMEDOUT` undeclared**：`db_mysql.c` 的 `pool_borrow()` 中使用了 `pthread_cond_timedwait()` 返回值比较 `ETIMEDOUT`，但未包含 `<errno.h>`。`ETIMEDOUT` 是 POSIX 错误码宏，定义在 `<errno.h>` 中。
+
+2. **`DB_RECONNECT_INTERVAL_SEC` undeclared**：`db_redis.c` 仍引用旧版常量名。V2.0 架构升级时 `db_config.h` 将重连配置从 `DB_RECONNECT_INTERVAL_SEC` 重构为 `DB_RECONNECT_BASE_SEC`，但 `db_redis.c` 未同步更新。
+
+3. **`MYSQL` 类型前向声明缺失**：`db_config.h` 中 `mysql_slot_t` 结构体包含 `MYSQL *conn` 指针字段，但 `MYSQL` 类型仅在 `<mysql/mysql.h>` 中声明。由于 `db_config.h` 被 `db_mysql.h` 在 `<mysql/mysql.h>` 之前 include，导致编译时 `MYSQL` 未定义。
+
+### 根因分析
+
+| 错误 | 根因 |
+|------|------|
+| ETIMEDOUT | `pthread_cond_timedwait` 返回值比较需要 `<errno.h>`，未包含 |
+| DB_RECONNECT_INTERVAL_SEC | V2.0 架构升级时 `db_config.h` 常量重命名，`db_redis.c` 遗漏更新 |
+| MYSQL 前向声明 | `mysql_slot_t` 定义在 `db_config.h`（MYSQL未知），应移至 `db_mysql.h`（MYSQL已知） |
+
+### 解决方案
+
+1. `db_mysql.c` 增加 `#include <errno.h>`
+2. `db_redis.c` 将 `DB_RECONNECT_INTERVAL_SEC` 替换为 `DB_RECONNECT_BASE_SEC`
+3. 将 `mysql_slot_t` 定义从 `db_config.h` 移至 `db_mysql.h`（`<mysql/mysql.h>` 之后）
+
+### 经验教训
+
+1. 使用 `pthread_cond_timedwait` 时必须显式包含 `<errno.h>` 以获取 `ETIMEDOUT`
+2. 重构常量名时需全局搜索替换，避免遗漏
+3. 依赖外部库类型（`MYSQL`）的结构体应定义在对应的模块头文件中，而非通用配置头文件
+4. 代码审查前的实际编译验证不可替代
+
+---
 
 ## 问题记录模板
 

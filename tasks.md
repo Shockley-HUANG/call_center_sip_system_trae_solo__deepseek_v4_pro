@@ -43,6 +43,20 @@
 | V4.0 | event_loop 公开 el_default_on_read 接口供SIP模块复用 | 2026-05-21 |
 | V4.0 | Makefile 新增 strip-bom 编译前自动剥离BOM（解决IDE追加BOM致GCC报错） | 2026-05-21 |
 | V4.0 | WSL 编译验证（零错误零警告）+ Demo 6组回归通过 | 2026-05-21 |
+| V4.2 | 迭代任务5：MySQL/Redis数据库层设计 | 2026-05-30 |
+| V4.2 | 数据库配置模块（db_config.h）：MySQL/Redis连接池配置+异步任务队列+重试常量 | 2026-05-30 |
+| V4.2 | MySQL数据表设计（schema.sql）：6张表（departments/extensions/agents/call_records/call_logs/voicemails） | 2026-05-30 |
+| V4.2 | MySQL连接池模块（db_mysql.h/c V2.0）：8槽位连接池+借还模型+重连风暴保护+批量CRUD | 2026-05-30 |
+| V4.2 | Redis缓存模块（db_redis.h/c）：KV/Hash/ZSet操作+坐席状态/部门空闲/路由配置缓存 | 2026-05-30 |
+| V4.2 | 数据同步层（db_sync.h/c V2.0）：异步Worker线程+生产者消费者队列+Cache Aside+运行时恢复 | 2026-05-30 |
+| V4.2 | 代码审查改进：真异步队列+连接池替代全局锁+Cache Aside+Redis运行时恢复+重连风暴保护 | 2026-05-30 |
+| V4.2 | 种子数据生成：1210名员工分机+830名坐席程序化生成 | 2026-05-30 |
+| V4.2 | 呼叫测试模块（call_test.h/c）：50次综合呼叫模拟+14种场景覆盖 | 2026-05-30 |
+| V4.2 | main.c 新增 --call-test CLI模式 | 2026-05-30 |
+| V4.2 | route.lua 新增 _TEST_FORCE_WORKTIME 测试模式标志 | 2026-05-30 |
+| V4.2 | Makefile 新增 mysql/hiredis pkg-config自动检测 + call-test目标 | 2026-05-30 |
+| V4.2 | MySQL安装+数据库初始化+50次呼叫数据写入验证（departments:9/extensions:1210/agents:830/call_records:50） | 2026-05-30 |
+| V4.2 | WSL 编译验证（零错误零警告）+ Demo + call-test 全通过 | 2026-05-30 |
 
 ## 未开始
 
@@ -50,9 +64,7 @@
 |------|------|
 | V0.4 | RTP媒体流传输 |
 | V0.4 | 会话状态管理（call_session_t生命周期） |
-| V0.4 | MySQL员工/分机数据对接 |
-| V0.4 | Redis坐席状态/排队队列对接 |
-| V0.5 | 通话日志持久化 |
 | V0.5 | 配置文件热加载 |
+| V0.5 | 通话日志实时写入 call_logs 表 |
 | V1.0 | 系统集成联调 |
 | V1.0 | 压力测试（千级并发） |

@@ -1,7 +1,8 @@
 /*
  * main.c — 呼叫中心 SIP 服务主入口
  * ============================================================
- * V4.0: UDP SIP 协议栈 + 全场景路由 + epoll 高并发
+ * V4.2: SIP协议栈 + 全场景路由 + epoll高并发 + MySQL连接池 + Redis缓存
+ *       + 异步Worker线程 + Cache Aside + 运行时恢复
  *
  * 启动模式：
  *   ./sip_server          启动 epoll 服务端（默认）
@@ -18,13 +19,22 @@
 #include "event_loop.h"
 #include "epoll_socket.h"
 #include "sip_handler.h"
+#include "db_config.h"
+#include "db_mysql.h"
+#include "db_redis.h"
+#include "db_sync.h"
+#include "call_test.h"
 
-#define LUA_SCRIPT_PATH  "lua/route.lua"
+#define LUA_SCRIPT_PATH   "lua/route.lua"
+#define DB_SCHEMA_PATH    "sql/schema.sql"
 #define PROJECT_NAME      "call_center_sip_server"
-#define PROJECT_VERSION   "4.0.0"
+#define PROJECT_VERSION   "4.2.0"
 
 static volatile int keep_running = 1;
 static event_loop_t *g_event_loop = NULL;
+static db_sync_context_t *g_db_sync = NULL;
+static mysql_pool_t    *g_mysql_pool = NULL;
+static redis_context_t *g_redis = NULL;
 
 static void signal_handler(int sig)
 {
@@ -50,6 +60,7 @@ static void print_banner(void)
     printf("╔══════════════════════════════════════════════════════╗\n");
     printf("║   Call Center SIP Server  v%s                    ║\n", PROJECT_VERSION);
     printf("║   企业400呼叫中心 - epoll高并发 + 全场景路由        ║\n");
+    printf("║   MySQL连接池 + Redis缓存 + 异步Worker            ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n");
     printf("\n");
 }
@@ -69,6 +80,71 @@ static const char *code_name(int code)
         case 9:  return "INVALID_KEY_RETRY";
         case 99: return "ERROR";
         default: return "UNKNOWN";
+    }
+}
+
+/* ============================================================
+ * 数据库初始化
+ * ============================================================ */
+static int init_database(void)
+{
+    mysql_config_t mysql_cfg;
+    memset(&mysql_cfg, 0, sizeof(mysql_cfg));
+    strncpy(mysql_cfg.host, "127.0.0.1", DB_MAX_HOST_LEN - 1);
+    mysql_cfg.port = 3306;
+    strncpy(mysql_cfg.user, "sip_user", DB_MAX_USER_LEN - 1);
+    strncpy(mysql_cfg.password, "sip_password", DB_MAX_PASS_LEN - 1);
+    strncpy(mysql_cfg.database, "call_center", DB_MAX_NAME_LEN - 1);
+    mysql_cfg.pool_size = MYSQL_POOL_DEFAULT_SIZE;
+    mysql_cfg.connect_timeout = 5;
+    mysql_cfg.read_timeout = 10;
+
+    redis_config_t redis_cfg;
+    memset(&redis_cfg, 0, sizeof(redis_cfg));
+    strncpy(redis_cfg.host, "127.0.0.1", DB_MAX_HOST_LEN - 1);
+    redis_cfg.port = 6379;
+    redis_cfg.password[0] = '\0';
+    redis_cfg.db_index = 0;
+    redis_cfg.pool_size = 10;
+    redis_cfg.connect_timeout = 3;
+
+    g_mysql_pool = db_mysql_pool_create(&mysql_cfg);
+    if (!g_mysql_pool) {
+        LOG_WARN("Failed to create MySQL pool, running without DB");
+    }
+
+    g_redis = db_redis_create(&redis_cfg);
+    if (!g_redis) {
+        LOG_WARN("Failed to create Redis context, running without cache");
+    }
+
+    g_db_sync = db_sync_create(g_mysql_pool, g_redis);
+    if (!g_db_sync) {
+        LOG_ERROR("Failed to create DB sync context");
+        return -1;
+    }
+
+    int ret = db_sync_init(g_db_sync, DB_SCHEMA_PATH);
+    if (ret != 0) {
+        LOG_WARN("DB sync init returned %d (databases may be unavailable)", ret);
+    }
+
+    return 0;
+}
+
+static void shutdown_database(void)
+{
+    if (g_db_sync) {
+        db_sync_destroy(g_db_sync);
+        g_db_sync = NULL;
+    }
+    if (g_redis) {
+        db_redis_destroy(g_redis);
+        g_redis = NULL;
+    }
+    if (g_mysql_pool) {
+        db_mysql_pool_destroy(g_mysql_pool);
+        g_mysql_pool = NULL;
     }
 }
 
@@ -332,6 +408,42 @@ static void demo_aux_functions(lua_vm_t *vm)
     printf("\n  ✓ Demo 6 完成\n");
 }
 
+/* ============================================================
+ * Demo 7: 数据库连接状态检测
+ * ============================================================ */
+static void demo_db_status(void)
+{
+    printf("\n");
+    printf("═══════════════════════════════════════════════════════\n");
+    printf("  Demo 7: 数据库连接状态检测\n");
+    printf("═══════════════════════════════════════════════════════\n\n");
+
+    if (!g_db_sync) {
+        printf("  DB Sync Context: 未初始化\n");
+        return;
+    }
+
+    printf("  MySQL 状态: %s\n", g_db_sync->db_enabled ? "✓ 已连接" : "✗ 未连接(降级运行)");
+    printf("  Redis 状态: %s\n", g_db_sync->cache_enabled ? "✓ 已连接" : "✗ 未连接(降级运行)");
+
+    if (g_db_sync->db_enabled && g_mysql_pool) {
+        int dept_count = db_mysql_load_departments(g_mysql_pool);
+        if (dept_count > 0) {
+            printf("  部门数据: %d 条记录就绪\n", dept_count);
+        }
+    }
+
+    if (g_db_sync->cache_enabled && g_redis) {
+        if (db_redis_ping(g_redis) == 0) {
+            printf("  Redis PING: PONG ✓\n");
+        }
+        int idle = db_redis_get_dept_idle(g_redis, "sales");
+        printf("  销售部空闲坐席(Redis): %d\n", idle >= 0 ? idle : -1);
+    }
+
+    printf("\n  ✓ Demo 7 完成\n");
+}
+
 static void run_demos(lua_vm_t *vm)
 {
     demo_ivr_and_fallback(vm);
@@ -340,15 +452,17 @@ static void run_demos(lua_vm_t *vm)
     demo_internal_call(vm);
     demo_route_call(vm);
     demo_aux_functions(vm);
+    demo_db_status();
 
     printf("\n");
     printf("═══════════════════════════════════════════════════════\n");
     printf("  全部 Demo 测试完成!\n");
-    printf("  覆盖 7 个核心接口:\n");
+    printf("  覆盖 7 个核心接口 + 数据库状态检测:\n");
     printf("    1. get_ivr_route          2. check_agent_status\n");
     printf("    3. overflow_route         4. time_judge_route\n");
     printf("    5. invalid_key_fallback   6. timeout_fallback\n");
     printf("    7. dept_internal_call_route\n");
+    printf("    8. 数据库状态检测 (MySQL/Redis)\n");
     printf("═══════════════════════════════════════════════════════\n\n");
 }
 
@@ -388,6 +502,8 @@ static int start_server_mode(lua_vm_t *vm)
     LOG_INFO("  SIP Server started on port %u", DEFAULT_SIP_PORT);
     LOG_INFO("  Max connections: %d", MAX_CONCURRENT_CALLS);
     LOG_INFO("  Idle timeout: %ds", CONNECTION_IDLE_TIMEOUT_SEC);
+    LOG_INFO("  MySQL: %s", (g_db_sync && g_db_sync->db_enabled) ? "connected" : "unavailable");
+    LOG_INFO("  Redis: %s", (g_db_sync && g_db_sync->cache_enabled) ? "connected" : "unavailable");
     LOG_INFO("  Press Ctrl+C to shutdown...");
     LOG_INFO("========================================");
 
@@ -402,10 +518,13 @@ static int start_server_mode(lua_vm_t *vm)
 int main(int argc, char *argv[])
 {
     int demo_mode = 0;
+    int call_test_mode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--demo") == 0) {
             demo_mode = 1;
+        } else if (strcmp(argv[i], "--call-test") == 0) {
+            call_test_mode = 1;
         }
     }
 
@@ -419,7 +538,8 @@ int main(int argc, char *argv[])
 
     LOG_INFO("========================================");
     LOG_INFO("  %s v%s starting...", PROJECT_NAME, PROJECT_VERSION);
-    LOG_INFO("  Mode: %s", demo_mode ? "Demo Test" : "Server");
+    LOG_INFO("  Mode: %s", call_test_mode ? "Call Test (50 calls)" :
+                           demo_mode ? "Demo Test" : "Server");
     LOG_INFO("========================================");
 
     lua_vm_t *vm = lua_vm_create();
@@ -442,7 +562,22 @@ int main(int argc, char *argv[])
 
     LOG_INFO("Lua route script V2.0 loaded successfully");
 
-    if (demo_mode) {
+    LOG_INFO("Initializing database layer (MySQL + Redis)...");
+    init_database();
+
+    if (call_test_mode) {
+        call_test_run(vm, g_db_sync);
+        LOG_INFO("Call test completed, server ready for SIP connections");
+        LOG_INFO("Press Ctrl+C to shutdown...");
+
+        while (keep_running) {
+#ifdef _WIN32
+            Sleep(1000);
+#else
+            sleep(1);
+#endif
+        }
+    } else if (demo_mode) {
         run_demos(vm);
         LOG_INFO("All demos completed, server ready for SIP connections");
         LOG_INFO("Press Ctrl+C to shutdown...");
@@ -466,6 +601,8 @@ int main(int argc, char *argv[])
         el_destroy(g_event_loop);
         g_event_loop = NULL;
     }
+
+    shutdown_database();
 
     lua_vm_destroy(vm);
     logger_close();
